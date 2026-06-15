@@ -1817,6 +1817,10 @@ function createNoteDetector(options = {}) {
     let _calWizardEl = null;
     let _calWizardTick = null;
     let _calWizardState = null;
+    // One-shot callbacks for the public launchCalibration() entry (input_setup
+    // onboarding). Set after the wizard opens; cleared on close.
+    let _calWizardOnDone = null;
+    let _calWizardOnCancel = null;
     const _CAL_WIZARD_NOTE_CHECK_DEFS = [
         { id: 'lowE', string: 0, fallbackLabel: 'Low E', fallbackMidi: 40 },
         { id: 'openA', string: 1, fallbackLabel: 'Open A', fallbackMidi: 45 },
@@ -6606,6 +6610,40 @@ function createNoteDetector(options = {}) {
         return applied;
     }
 
+    // Public entry: open the Calibration Wizard for a given instrument and get a
+    // one-shot completion/cancel callback. Used by the input_setup onboarding
+    // wizard (guitar/bass). Thin wrapper over openCalibrationWizard: sets the
+    // instrument context, ensures Detect is on (the measurement steps need live
+    // input), and reports the outcome. Callbacks are assigned AFTER
+    // openCalibrationWizard so its internal pre-close cannot wipe them.
+    function launchCalibration(opts) {
+        opts = opts || {};
+        const onDone = typeof opts.onDone === 'function' ? opts.onDone : null;
+        const onCancel = typeof opts.onCancel === 'function' ? opts.onCancel : null;
+        if (opts.instrument === 'guitar' || opts.instrument === 'bass') {
+            currentArrangement = opts.instrument;
+        }
+        const start = () => {
+            try {
+                openCalibrationWizard();
+            } catch (e) {
+                if (onCancel) { try { onCancel('error'); } catch (_) { /* isolate */ } }
+                return;
+            }
+            _calWizardOnDone = onDone;
+            _calWizardOnCancel = onCancel;
+        };
+        // Measurement steps (noise/signal/notes) need Detect ON. Enable first;
+        // fail-soft — open the wizard regardless so the caller is never stranded.
+        if (!enabled) {
+            let p = null;
+            try { p = enable(); } catch (_) { p = null; }
+            if (p && typeof p.then === 'function') p.then(start, start); else start();
+        } else {
+            start();
+        }
+    }
+
     function _calWizardDeviceLabel() {
         if (!selectedDeviceId) return 'Default system input';
         return `Device ${selectedDeviceId.slice(0, 12)}…`;
@@ -6964,6 +7002,9 @@ function createNoteDetector(options = {}) {
     }
 
     function calibrationWizardClose() {
+        // Capture launchCalibration() callback context before teardown nulls it.
+        const _calHadWizard = !!_calWizardEl;
+        const _calAppliedResult = (_calWizardState && _calWizardState.applied) || null;
         _calWizardStopAllStringsRun('close');
         _calWizardClearPauseRetries();
         _calWizardStopAutoCapture();
@@ -6978,6 +7019,17 @@ function createNoteDetector(options = {}) {
             _calWizardEl = null;
         }
         _calWizardState = null;
+        // Fire the one-shot launchCalibration() callbacks: applied settings →
+        // done, otherwise → cancel. Only when a wizard was actually open (so the
+        // open-time pre-close is a no-op).
+        if (_calHadWizard) {
+            const onDone = _calWizardOnDone;
+            const onCancel = _calWizardOnCancel;
+            _calWizardOnDone = null;
+            _calWizardOnCancel = null;
+            if (_calAppliedResult && typeof onDone === 'function') { try { onDone(_calAppliedResult); } catch (_) { /* isolate */ } }
+            else if (typeof onCancel === 'function') { try { onCancel('closed'); } catch (_) { /* isolate */ } }
+        }
     }
 
     function _calWizardDetectBanner(snap) {
@@ -14529,6 +14581,7 @@ function createNoteDetector(options = {}) {
         getCalibrationSnapshot,
         getVerifierRejects,
         openCalibrationWizard,
+        launchCalibration,
         closeCalibrationWizard: calibrationWizardClose,
         openInstrumentCalibrationLab,
         closeInstrumentCalibrationLab: calibrationLabClose,
