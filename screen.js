@@ -12767,7 +12767,7 @@ function createNoteDetector(options = {}) {
                         <input class="nd-tr-song w-full bg-dark-600 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 mb-3">
 
                         <label class="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">custom song File Name</label>
-                        <input class="nd-tr-custom song w-full bg-dark-600 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 mb-3">
+                        <input class="nd-tr-custom-song w-full bg-dark-600 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 mb-3">
 
                         <label class="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">Instrument</label>
                         <select class="nd-tr-instr w-full bg-dark-600 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 mb-3">
@@ -12814,7 +12814,7 @@ function createNoteDetector(options = {}) {
             // Set values via .value rather than innerHTML so user-
             // controllable strings can't break out into HTML.
             $('.nd-tr-song').value    = prefill.songName || '';
-            $('.nd-tr-custom song').value    = prefill.cdlcFilename || '';
+            $('.nd-tr-custom-song').value    = prefill.cdlcFilename || '';
             $('.nd-tr-instr').value   = (prefill.instrument === 'bass') ? 'bass' : 'guitar';
             $('.nd-tr-tuning').value  = prefill.tuning || '';
             $('.nd-tr-name').value    = prefill.name || '';
@@ -12923,7 +12923,7 @@ function createNoteDetector(options = {}) {
                 if (!consentCb.checked) return; // belt-and-braces
                 const formData = {
                     songName:     $('.nd-tr-song').value.trim(),
-                    cdlcFilename: $('.nd-tr-custom song').value.trim(),
+                    cdlcFilename: $('.nd-tr-custom-song').value.trim(),
                     instrument:   $('.nd-tr-instr').value,
                     tuning:       $('.nd-tr-tuning').value.trim(),
                     name:         $('.nd-tr-name').value.trim(),
