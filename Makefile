@@ -24,9 +24,9 @@ COMPOSE        := docker compose -f $(SLOPSMITH_DIR)/docker-compose.yml -f $(OVE
 # hear yourself while practicing. Hardware direct-monitor on your audio
 # interface (if you have one) is always better; this is the zero-hardware fix.
 #
-# Picks a Rocksmith adapter automatically if present; override MONITOR_SRC to
+# Defaults to your system's default capture source; override MONITOR_SRC to
 # target something else (e.g. your USB audio interface's capture node).
-MONITOR_SRC         ?= $(shell pactl list short sources 2>/dev/null | awk '/Rocksmith/ {print $$2; exit}')
+MONITOR_SRC         ?= $(shell pactl get-default-source 2>/dev/null)
 MONITOR_SINK        ?= $(shell pactl get-default-sink 2>/dev/null)
 MONITOR_LATENCY_MS  ?= 50
 MONITOR_ID_FILE     := /tmp/slopsmith-monitor.id
