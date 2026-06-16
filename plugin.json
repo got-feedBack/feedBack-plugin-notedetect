@@ -1,0 +1,10 @@
+{
+  "id": "note_detect",
+  "name": "Note Detection",
+  "version": "1.15.2",
+  "private": false,
+  "script": "screen.js",
+  "styles": "assets/plugin.css",
+  "settings": { "html": "settings.html" },
+  "routes": "routes.py"
+}

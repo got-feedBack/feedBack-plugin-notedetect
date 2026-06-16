@@ -1,0 +1,15 @@
+.env
+node_modules/
+
+# Runtime artifacts — never commit.
+__pycache__/
+*.pyc
+.slopsmith-installed.json
+
+# Local regression-suite state. Fixtures point at recordings on the
+# contributor's machine (private), so they're not portable. Keep the
+# example fixtures file tracked as a template; ignore the real ones.
+tools/regression-fixtures.json
+tools/regression-baseline.json
+.headless/
+.agent-shell/

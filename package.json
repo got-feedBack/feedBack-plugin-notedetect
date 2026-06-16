@@ -1,0 +1,12 @@
+{
+  "name": "slopsmith-plugin-notedetect",
+  "version": "1.15.2",
+  "private": true,
+  "description": "Slopsmith note detection plugin — test harness for detection core",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "regression": "node tools/regression.js",
+    "regression:update": "node tools/regression.js --update-baseline tools/regression-baseline.json",
+    "regression:vs-baseline": "node tools/regression.js --baseline tools/regression-baseline.json"
+  }
+}

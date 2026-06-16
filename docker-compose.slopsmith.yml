@@ -1,0 +1,29 @@
+# Compose overlay that mounts this plugin into a running Slopsmith
+# container via the SLOPSMITH_PLUGINS_DIR env var (upstream slopsmith@b65a08c).
+#
+# Docker Compose gotcha: relative `volumes:` paths in an overlay resolve against
+# the FIRST compose file's project directory, not the overlay's directory —
+# so this file uses ${PLUGIN_DIR} (absolute path) instead of `.`. The Makefile
+# exports PLUGIN_DIR automatically. If running compose by hand:
+#
+#   PLUGIN_DIR=$(pwd) docker compose \
+#       -f /path/to/slopsmith/docker-compose.yml \
+#       -f ./docker-compose.slopsmith.yml \
+#       up -d
+#
+# The subdirectory name under /opt/user-plugins is cosmetic; slopsmith derives
+# the plugin id from plugin.json. Edits to screen.js in this repo are visible
+# to the running container on the next page load.
+
+services:
+  web:
+    # !override replaces (rather than merges) the base compose's ports list.
+    # Without this, SLOPSMITH_PORT=8088 would just ADD 8088 while keeping
+    # the base 8000 binding — and the 8000 bind would still collide with
+    # anything already on that port.
+    ports: !override
+      - "${SLOPSMITH_PORT:-8000}:8000"
+    volumes:
+      - ${PLUGIN_DIR:?set PLUGIN_DIR to this plugin repo root}:/opt/user-plugins/note_detect:ro
+    environment:
+      - SLOPSMITH_PLUGINS_DIR=/opt/user-plugins

@@ -1,0 +1,14 @@
+[
+    {
+        "name": "benchmark v1 — fs=4096 av=0",
+        "audio": "../../static/note_detect_recordings/your-take.wav",
+        "chart": "../../static/sloppak_cache/note_detect_benchmark_v1.sloppak/arrangements/lead.json",
+        "args": ["--frame-size", "4096", "--av-offset-ms=0"]
+    },
+    {
+        "name": "benchmark v1 — fs=4096 av=50",
+        "audio": "../../static/note_detect_recordings/your-take.wav",
+        "chart": "../../static/sloppak_cache/note_detect_benchmark_v1.sloppak/arrangements/lead.json",
+        "args": ["--frame-size", "4096", "--av-offset-ms=50"]
+    }
+]
