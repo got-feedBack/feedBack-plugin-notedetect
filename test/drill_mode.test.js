@@ -120,7 +120,7 @@ test('song:loaded clears the iteration history (new song = new passage)', () => 
     // here so getDrillStats()'s inline sync sees the actual host
     // state rather than re-activating from stale bounds.
     core.slopsmith._loop = { loopA: null, loopB: null };
-    core.slopsmith._fire('song:loaded', { filename: 'next-song.psarc' });
+    core.slopsmith._fire('song:loaded', { filename: 'next-song.archive' });
     assert.equal(det.getDrillStats().iterations.length, 0, 'song change must clear drill history');
     assert.equal(det.getDrillStats().active, false, 'active flag must clear on song change');
     det.destroy();

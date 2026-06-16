@@ -156,7 +156,7 @@ test('setVerifyTarget ctx: the target survives a host song-switch', async () => 
 
     // Host loads a completely different (guitar) song mid-session.
     env.setSongInfo({ arrangement: 'Lead', tuning: [0, 0, 0, 0, 0, 0], capo: 0 });
-    env.core.slopsmith._fire('song:loaded', { filename: 'some-guitar-song.psarc' });
+    env.core.slopsmith._fire('song:loaded', { filename: 'some-guitar-song.archive' });
     await flushPendingAsync();
 
     const before = env.scoreChordRequests.length;
@@ -419,7 +419,7 @@ test('setVerifyTarget without ctx: legacy chart-coupling is preserved (dropped o
 
     // Host switches to a bass song whose tuning differs from the bound sig.
     env.setSongInfo({ arrangement: 'Bass', tuning: [0, 0, 0, 0], capo: 0 });
-    env.core.slopsmith._fire('song:loaded', { filename: 'some-bass-song.psarc' });
+    env.core.slopsmith._fire('song:loaded', { filename: 'some-bass-song.archive' });
     await flushPendingAsync();
 
     await detectTick();

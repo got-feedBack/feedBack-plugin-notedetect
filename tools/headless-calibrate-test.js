@@ -4,14 +4,14 @@
 // whether calibrate ran and what it picked. Diagnoses the live no-op:
 // did the detection log fill? did song:ended trigger? did setAvOffsetMs fire?
 //
-// Env: SLOP_URL, FAKE_WAV (recording to feed as mic), SONG (psarc filename),
+// Env: SLOP_URL, FAKE_WAV (recording to feed as mic), SONG (archive filename),
 //      ARRANGEMENT (index, default 2 = Bass).
 const { chromium } = require('playwright');
 const fs = require('fs');
 
 const URL = process.env.SLOP_URL || 'http://localhost:8000';
 const FAKE_WAV = process.env.FAKE_WAV || '/tmp/fakemic.wav';
-const SONG = process.env.SONG || 'Arctic-Monkeys_Whyd-You-Only-Call-Me-When-Youre-High_v4_DD_m.psarc';
+const SONG = process.env.SONG || 'Arctic-Monkeys_Whyd-You-Only-Call-Me-When-Youre-High_v4_DD_m.archive';
 const ARR = parseInt(process.env.ARRANGEMENT || '2', 10);
 
 (async () => {

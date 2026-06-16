@@ -37,7 +37,7 @@ test('default singleton: _bindAutoRecord binds song:loaded exactly once and auto
     det._bindAutoRecord();
     assert.equal(core.slopsmith._listenerCount('song:loaded'), 1, 'still one after re-bind');
 
-    core.slopsmith._fire('song:loaded', { filename: 'x.psarc' });
+    core.slopsmith._fire('song:loaded', { filename: 'x.archive' });
     assert.equal(det.getRecordingState().armed, true, 'auto-armed by song:loaded');
     det.destroy();
 });
@@ -47,7 +47,7 @@ test('autoRecord off gates the auto-arm', () => {
     const det = core.createNoteDetector({ isDefault: true });
     det.setAutoRecord(false);
     det._bindAutoRecord();
-    core.slopsmith._fire('song:loaded', { filename: 'x.psarc' });
+    core.slopsmith._fire('song:loaded', { filename: 'x.archive' });
     assert.equal(det.getRecordingState().armed, false, 'opt-out keeps it disarmed');
     det.destroy();
 });
@@ -57,7 +57,7 @@ test('non-default instance never binds auto-record', () => {
     const det = core.createNoteDetector(); // isDefault:false
     det._bindAutoRecord();
     assert.equal(core.slopsmith._listenerCount('song:loaded'), 0, 'no listener bound');
-    core.slopsmith._fire('song:loaded', { filename: 'x.psarc' });
+    core.slopsmith._fire('song:loaded', { filename: 'x.archive' });
     assert.equal(det.getRecordingState().armed, false, 'splitscreen panel does not auto-record');
     det.destroy();
 });
@@ -105,7 +105,7 @@ test('a failed auto-save preserves the take — neither song:loaded nor song:pla
     // song:loaded tries to flush the stranded take. saveRecordingNow()
     // fails here (no fetch in the vm), returns null and KEEPS the buffer.
     // The handler must NOT re-arm — armRecording() would wipe the take.
-    core.slopsmith._fire('song:loaded', { filename: 'next.psarc' });
+    core.slopsmith._fire('song:loaded', { filename: 'next.archive' });
     await new Promise((r) => setTimeout(r, 0)); // drain the async handler
     let st = det.getRecordingState();
     assert.equal(st.armed, false, 'not re-armed after a failed save');
@@ -131,7 +131,7 @@ test('a second song:loaded does not re-arm over a disarmed, retained failed take
     // _recArmed false with _recChunks intact.
     core.slopsmith._fire('song:play', {});
     det._injectRecChunkForTest();
-    core.slopsmith._fire('song:loaded', { filename: 'a.psarc' });
+    core.slopsmith._fire('song:loaded', { filename: 'a.archive' });
     await new Promise((r) => setTimeout(r, 0));
     let st = det.getRecordingState();
     assert.equal(st.armed, false, 'disarmed after the failed flush');
@@ -139,7 +139,7 @@ test('a second song:loaded does not re-arm over a disarmed, retained failed take
 
     // A SUBSEQUENT song:loaded (armed already false) must still not wipe it —
     // without the guard, armRecording() would clear the preserved take.
-    core.slopsmith._fire('song:loaded', { filename: 'b.psarc' });
+    core.slopsmith._fire('song:loaded', { filename: 'b.archive' });
     await new Promise((r) => setTimeout(r, 0));
     st = det.getRecordingState();
     assert.equal(st.armed, false, 'not re-armed over the preserved take');
@@ -152,11 +152,11 @@ test('a second song:loaded with nothing captured re-arms without throwing', () =
     const det = core.createNoteDetector({ isDefault: true });
     det.setAutoRecord(true); // opt in (default is off)
     det._bindAutoRecord();
-    core.slopsmith._fire('song:loaded', { filename: 'a.psarc' });
+    core.slopsmith._fire('song:loaded', { filename: 'a.archive' });
     assert.equal(det.getRecordingState().armed, true);
     // Song stopped without song:ended, new song loads — the prior empty
     // take is discarded and the new one armed; no two-songs-in-one-WAV.
-    core.slopsmith._fire('song:loaded', { filename: 'b.psarc' });
+    core.slopsmith._fire('song:loaded', { filename: 'b.archive' });
     assert.equal(det.getRecordingState().armed, true, 'still armed for the new song');
     det.destroy();
 });

@@ -60,7 +60,7 @@ const REC_DIR = process.env.REC_DIR || '';
       } else { log.push('detect already enabled'); }
       if (nd.setAutoRecord) { nd.setAutoRecord(true); log.push('auto-record opted in (default is off)'); }
       await sleep(800);
-      sm.emit('song:loaded', { filename: 'fakemic.psarc', title: 'headless fakemic' });
+      sm.emit('song:loaded', { filename: 'fakemic.archive', title: 'headless fakemic' });
       await sleep(100);
       sm.emit('song:play', { time: 0 });
       await sleep(5000);

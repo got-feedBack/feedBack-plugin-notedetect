@@ -178,8 +178,8 @@ const _ndShared = (window.__ndShared = window.__ndShared || {
     playSongRetries: 0,   // bounded-retry counter for _ndInstallPlaySongHook
     // Most-recent filename passed to playSong(). hw.getSongInfo() doesn't
     // expose a `filename` field (per the WS song_info contract), but
-    // playSong's first arg IS the CDLC filename — capture it in the
-    // wrapper so the training-bundle manifest can populate the CDLC
+    // playSong's first arg IS the custom song filename — capture it in the
+    // wrapper so the training-bundle manifest can populate the custom song
     // File Name field that getSongInfo can't supply on its own.
     currentFilename: null,
     // Token of the detector instance that currently owns an engine chart slot
@@ -736,7 +736,7 @@ function _ndNearestOctaveCents(detectedMidi, expectedMidi) {
 // whole-octave detector mistakes), return that note's (string, fret) — the
 // player is hitting the charted fingering. Otherwise fall back to the
 // geometric first-match on the arrangement's tuning. This mirrors what
-// score-follower apps (e.g. Rocksmith) do: trust the chart for display when
+// score-follower apps (e.g. the chart) do: trust the chart for display when
 // the player is on-pitch, only guess when they aren't.
 function _ndResolveDisplayFingering(detectedMidi, candidateNotes, arrangement, stringCount, offsets, capo, pitchToleranceCents) {
     if (candidateNotes && candidateNotes.length > 0) {
@@ -2591,7 +2591,7 @@ function createNoteDetector(options = {}) {
 
     // Open an instrument capture stream, relaxing over-constrained inputs.
     // Two device classes break a strict getUserMedia on macOS in particular:
-    //   - mono-only USB interfaces (e.g. the Rocksmith Real Tone Cable)
+    //   - mono-only USB interfaces (e.g. the chart Real Tone Cable)
     //     reject `channelCount: 2`;
     //   - a stale saved `deviceId` (device unplugged since last session)
     //     rejects `deviceId: { exact }`.
@@ -10602,12 +10602,12 @@ function createNoteDetector(options = {}) {
         //   1. hw.getStringCount() — host's authoritative count. Asked
         //      independently of info.tuning because the host may know
         //      the count even when no tuning array shipped, and because
-        //      RS XML pads bass tunings to six entries so tuning.length
+        //      arrangement XML pads bass tunings to six entries so tuning.length
         //      alone can't distinguish bass-4 from a real 6-string.
         //   2. tuning.length when it's consistent with the arrangement
         //      — bass-4/5 or guitar-6/7/8. This preserves the older-host
         //      path for 7/8-string guitars and 5-string basses, while
-        //      rejecting the RS-XML bass-padded-to-6 shape (which
+        //      rejecting the arrangement XML bass-padded-to-6 shape (which
         //      falls through to (3) below for the correct bass-4).
         //   3. Per-arrangement default — 4 for bass, 6 for guitar.
         //      Closes the regression a bass chart hit when it had no
@@ -12691,7 +12691,7 @@ function createNoteDetector(options = {}) {
     }
     // Contributor + per-instrument prefs persisted in localStorage so
     // the upload dialog auto-fills on subsequent takes. Song-specific
-    // fields (title, cdlc filename, tuning) always come from songInfo,
+    // fields (title, custom song filename, tuning) always come from songInfo,
     // so they're NOT persisted — last song's title would be wrong for
     // the next.
     const _TRAINING_PREFS_KEY = 'nd_training_prefs_v1';
@@ -12766,8 +12766,8 @@ function createNoteDetector(options = {}) {
                         <label class="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">Song Name</label>
                         <input class="nd-tr-song w-full bg-dark-600 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 mb-3">
 
-                        <label class="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">CDLC File Name</label>
-                        <input class="nd-tr-cdlc w-full bg-dark-600 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 mb-3">
+                        <label class="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">custom song File Name</label>
+                        <input class="nd-tr-custom song w-full bg-dark-600 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 mb-3">
 
                         <label class="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">Instrument</label>
                         <select class="nd-tr-instr w-full bg-dark-600 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 mb-3">
@@ -12814,7 +12814,7 @@ function createNoteDetector(options = {}) {
             // Set values via .value rather than innerHTML so user-
             // controllable strings can't break out into HTML.
             $('.nd-tr-song').value    = prefill.songName || '';
-            $('.nd-tr-cdlc').value    = prefill.cdlcFilename || '';
+            $('.nd-tr-custom song').value    = prefill.cdlcFilename || '';
             $('.nd-tr-instr').value   = (prefill.instrument === 'bass') ? 'bass' : 'guitar';
             $('.nd-tr-tuning').value  = prefill.tuning || '';
             $('.nd-tr-name').value    = prefill.name || '';
@@ -12923,7 +12923,7 @@ function createNoteDetector(options = {}) {
                 if (!consentCb.checked) return; // belt-and-braces
                 const formData = {
                     songName:     $('.nd-tr-song').value.trim(),
-                    cdlcFilename: $('.nd-tr-cdlc').value.trim(),
+                    cdlcFilename: $('.nd-tr-custom song').value.trim(),
                     instrument:   $('.nd-tr-instr').value,
                     tuning:       $('.nd-tr-tuning').value.trim(),
                     name:         $('.nd-tr-name').value.trim(),
@@ -12999,7 +12999,7 @@ function createNoteDetector(options = {}) {
             // where no snapshot was provided.
             const info = songInfoSnapshot
                 || ((hw && hw.getSongInfo) ? hw.getSongInfo() : {});
-            // CDLC filename: prefer the value pinned at song:ended by
+            // custom song filename: prefer the value pinned at song:ended by
             // the caller (cdlcFilenameSnapshot) — _ndShared.currentFilename
             // is a process-global another splitscreen panel can overwrite
             // before this async upload runs. The direct reads are only a
@@ -13229,7 +13229,7 @@ function createNoteDetector(options = {}) {
                 // time the async save+upload chain runs the user may
                 // have navigated back to the library — at which point
                 // hw.getSongInfo() returns {} and the upload modal
-                // would show empty Song Name / CDLC filename / Tuning.
+                // would show empty Song Name / custom song filename / Tuning.
                 // Pin all of it here.
                 const shouldUpload = _recArmedForTraining;
                 // _liveSessionId may already be null here: _liveOnEnded
@@ -13239,7 +13239,7 @@ function createNoteDetector(options = {}) {
                 // locating this take's live_<id>.jsonl detect-stream.
                 const sessionAtEnd = _liveSessionId || _liveLastSessionId;
                 const songInfoAtEnd = (hw && hw.getSongInfo) ? hw.getSongInfo() : {};
-                // Pin the CDLC filename HERE too. _ndShared.currentFilename
+                // Pin the custom song filename HERE too. _ndShared.currentFilename
                 // is a process-global the playSong wrapper overwrites, so
                 // a splitscreen panel starting another song before this
                 // take's async upload runs would otherwise leak the wrong
@@ -14997,10 +14997,10 @@ function _ndInstallPlaySongHook() {
     // points at our wrapper. Bail rather than wrap it again.
     if (origPlaySong._ndWrapped) return;
     const wrapper = async function (...args) {
-        // Pin the CDLC filename — args[0] is the playSong filename
+        // Pin the custom song filename — args[0] is the playSong filename
         // arg; the WS song_info payload that hw.getSongInfo() returns
         // doesn't carry this field, so this is our only reliable
-        // signal for the training-bundle manifest's CDLC File Name.
+        // signal for the training-bundle manifest's custom song File Name.
         // Decode URI-encoded forms like 'sloppak%2Fbadramer.sloppak'.
         if (typeof args[0] === 'string') {
             let f = args[0];

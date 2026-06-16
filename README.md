@@ -114,7 +114,7 @@ Field reference for the per-note events:
 
 | Field | Meaning | Present for |
 |---|---|---|
-| `note` | `{ s, f }` — Rocksmith string / fret of the chart note | all events |
+| `note` | `{ s, f }` — the chart string / fret of the chart note | all events |
 | `time` | Classification time in seconds — the plugin's view of "now" when it made the decision (derived from `highway.getTime()` plus the A/V-sync offset, minus the detector's latency compensation) | all events |
 | `noteTime` | Chart time in seconds — when the note is scheduled on the chart | all events |
 | `expectedMidi` | MIDI number the chart note should produce given the arrangement's tuning | all events |

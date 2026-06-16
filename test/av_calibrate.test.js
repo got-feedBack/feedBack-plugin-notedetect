@@ -103,7 +103,7 @@ test('lifecycle: song:loaded clears the take and the paused flag', () => {
     det._bindCalEvents();
     det._calSeedForTest(5);
     core.slopsmith._fire('song:pause', {});
-    core.slopsmith._fire('song:loaded', { filename: 'x.psarc' });
+    core.slopsmith._fire('song:loaded', { filename: 'x.archive' });
     const st = det._calState();
     assert.equal(st.detections, 0);
     assert.equal(st.done, false);

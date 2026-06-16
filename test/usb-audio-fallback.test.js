@@ -1,6 +1,6 @@
 // Over-constrained getUserMedia fallback for USB audio interfaces.
 //
-// Mono-only USB interfaces (e.g. the Rocksmith Real Tone Cable) reject
+// Mono-only USB interfaces (e.g. the chart Real Tone Cable) reject
 // `channelCount: 2` with an OverconstrainedError, and a stale saved
 // `deviceId` (device unplugged since last session) rejects
 // `deviceId: { exact }`. openInstrumentStream() inspects

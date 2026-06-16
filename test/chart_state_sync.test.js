@@ -60,7 +60,7 @@ test('bass→guitar song:loaded resets arrangement/stringCount/tuning/capo', () 
         capo: 0,
     });
     core.highway.getStringCount = () => 6;
-    core.slopsmith._fire('song:loaded', { filename: 'guitar-song.psarc' });
+    core.slopsmith._fire('song:loaded', { filename: 'guitar-song.archive' });
 
     state = det._getChartState();
     assert.equal(state.arrangement, 'guitar', 'arrangement must flip off bass');
@@ -123,7 +123,7 @@ test('destroy() unbinds song:loaded, song:ready and arrangement:changed listener
 
     // Firing post-destroy must not throw.
     assert.doesNotThrow(() => {
-        core.slopsmith._fire('song:loaded', { filename: 'x.psarc' });
+        core.slopsmith._fire('song:loaded', { filename: 'x.archive' });
         core.slopsmith._fire('song:ready', { hasPhraseData: true });
         core.slopsmith._fire('arrangement:changed', { arrangement: 'Lead' });
     });
@@ -214,8 +214,8 @@ test('older host without getStringCount: 5-string bass tuning.length wins over p
     det.destroy();
 });
 
-test('older host without getStringCount: bass with RS-XML-padded 6-entry tuning falls back to bass-4', () => {
-    // RS XML pads bass tunings to six entries. With no host count and
+test('older host without getStringCount: bass with arrangement XML-padded 6-entry tuning falls back to bass-4', () => {
+    // arrangement XML pads bass tunings to six entries. With no host count and
     // no way to disambiguate, tuning.length=6 is NOT consistent with
     // arrangement=bass, so the per-arrangement default (4) must win.
     // Without this guard the bass chart would map against a 6-entry
@@ -227,6 +227,6 @@ test('older host without getStringCount: bass with RS-XML-padded 6-entry tuning 
     });
     det._syncChartStateFromHw();
     assert.equal(det._getChartState().stringCount, 4,
-        'bass + tuning.length=6 (RS-XML pad) must fall back to bass-4');
+        'bass + tuning.length=6 (arrangement XML pad) must fall back to bass-4');
     det.destroy();
 });

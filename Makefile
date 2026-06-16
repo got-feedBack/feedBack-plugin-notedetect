@@ -89,7 +89,7 @@ verify-mount: check-slopsmith ## Confirm the plugin is visible inside the contai
 .PHONY: monitor-on
 monitor-on: ## Route instrument input to speakers via PipeWire loopback ($(MONITOR_LATENCY_MS)ms)
 	@command -v pactl >/dev/null 2>&1 || { echo "error: pactl not found (install pulseaudio-utils)"; exit 1; }
-	@test -n "$(MONITOR_SRC)"  || { echo "error: no Rocksmith adapter detected. Set MONITOR_SRC=<source-name> (see: pactl list short sources)"; exit 1; }
+	@test -n "$(MONITOR_SRC)"  || { echo "error: no the chart adapter detected. Set MONITOR_SRC=<source-name> (see: pactl list short sources)"; exit 1; }
 	@test -n "$(MONITOR_SINK)" || { echo "error: could not determine default sink"; exit 1; }
 	@if [ -f $(MONITOR_ID_FILE) ]; then \
 	    echo "monitor already running (module $$(cat $(MONITOR_ID_FILE))). run 'make monitor-off' first."; \
