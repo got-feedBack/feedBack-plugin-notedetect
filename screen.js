@@ -1821,6 +1821,11 @@ function createNoteDetector(options = {}) {
     // onboarding). Set after the wizard opens; cleared on close.
     let _calWizardOnDone = null;
     let _calWizardOnCancel = null;
+    // Instrument forced by launchCalibration({instrument}) for the standalone
+    // (no-song) onboarding flow. _syncChartStateFromHw resets currentArrangement
+    // to 'guitar' on every resolve when no chart is loaded, which would clobber a
+    // bass calibration; honor this override while no real song tuning exists.
+    let _calWizardForceArrangement = null;
     const _CAL_WIZARD_NOTE_CHECK_DEFS = [
         { id: 'lowE', string: 0, fallbackLabel: 'Low E', fallbackMidi: 40 },
         { id: 'openA', string: 1, fallbackLabel: 'Open A', fallbackMidi: 45 },
@@ -5946,9 +5951,19 @@ function createNoteDetector(options = {}) {
         let info = null;
         try { info = (hw && hw.getSongInfo) ? hw.getSongInfo() : null; } catch (_) {}
         const hasTuning = !!(info && Array.isArray(info.tuning) && info.tuning.length > 0);
-        const arrangement = currentArrangement || 'guitar';
-        const stringCount = (Number.isFinite(currentStringCount) && currentStringCount > 0)
+        // No real song tuning (onboarding standalone): _syncChartStateFromHw just
+        // reset currentArrangement to 'guitar', so honor the launchCalibration
+        // override instead of silently calibrating guitar for a bass request.
+        const forced = !hasTuning && _calWizardForceArrangement;
+        const arrangement = forced
+            ? _calWizardForceArrangement
+            : (currentArrangement || 'guitar');
+        // When forcing a standalone arrangement with no host chart, _syncChartStateFromHw
+        // left currentStringCount at the guitar default (6); pick the arrangement's own
+        // default so a bass calibration shows 4 strings, not 6 (two of them blank).
+        let stringCount = (Number.isFinite(currentStringCount) && currentStringCount > 0)
             ? currentStringCount : 6;
+        if (forced && _calWizardForceArrangement === 'bass') stringCount = 4;
         const offsets = Array.isArray(tuningOffsets) ? tuningOffsets : [0, 0, 0, 0, 0, 0];
         return { hasTuning, arrangement, stringCount, offsets };
     }
@@ -6622,6 +6637,9 @@ function createNoteDetector(options = {}) {
         const onCancel = typeof opts.onCancel === 'function' ? opts.onCancel : null;
         if (opts.instrument === 'guitar' || opts.instrument === 'bass') {
             currentArrangement = opts.instrument;
+            // Survive _syncChartStateFromHw's reset-to-guitar on every note-check
+            // resolve while no real song chart is loaded (onboarding standalone).
+            _calWizardForceArrangement = opts.instrument;
         }
         const start = () => {
             try {
@@ -7019,6 +7037,7 @@ function createNoteDetector(options = {}) {
             _calWizardEl = null;
         }
         _calWizardState = null;
+        _calWizardForceArrangement = null;
         // Fire the one-shot launchCalibration() callbacks: applied settings →
         // done, otherwise → cancel. Only when a wizard was actually open (so the
         // open-time pre-close is a no-op).
