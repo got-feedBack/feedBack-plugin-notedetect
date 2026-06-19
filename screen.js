@@ -1817,6 +1817,15 @@ function createNoteDetector(options = {}) {
     let _calWizardEl = null;
     let _calWizardTick = null;
     let _calWizardState = null;
+    // One-shot callbacks for the public launchCalibration() entry (input_setup
+    // onboarding). Set after the wizard opens; cleared on close.
+    let _calWizardOnDone = null;
+    let _calWizardOnCancel = null;
+    // Instrument forced by launchCalibration({instrument}) for the standalone
+    // (no-song) onboarding flow. _syncChartStateFromHw resets currentArrangement
+    // to 'guitar' on every resolve when no chart is loaded, which would clobber a
+    // bass calibration; honor this override while no real song tuning exists.
+    let _calWizardForceArrangement = null;
     const _CAL_WIZARD_NOTE_CHECK_DEFS = [
         { id: 'lowE', string: 0, fallbackLabel: 'Low E', fallbackMidi: 40 },
         { id: 'openA', string: 1, fallbackLabel: 'Open A', fallbackMidi: 45 },
@@ -5942,9 +5951,19 @@ function createNoteDetector(options = {}) {
         let info = null;
         try { info = (hw && hw.getSongInfo) ? hw.getSongInfo() : null; } catch (_) {}
         const hasTuning = !!(info && Array.isArray(info.tuning) && info.tuning.length > 0);
-        const arrangement = currentArrangement || 'guitar';
-        const stringCount = (Number.isFinite(currentStringCount) && currentStringCount > 0)
+        // No real song tuning (onboarding standalone): _syncChartStateFromHw just
+        // reset currentArrangement to 'guitar', so honor the launchCalibration
+        // override instead of silently calibrating guitar for a bass request.
+        const forced = !hasTuning && _calWizardForceArrangement;
+        const arrangement = forced
+            ? _calWizardForceArrangement
+            : (currentArrangement || 'guitar');
+        // When forcing a standalone arrangement with no host chart, _syncChartStateFromHw
+        // left currentStringCount at the guitar default (6); pick the arrangement's own
+        // default so a bass calibration shows 4 strings, not 6 (two of them blank).
+        let stringCount = (Number.isFinite(currentStringCount) && currentStringCount > 0)
             ? currentStringCount : 6;
+        if (forced && _calWizardForceArrangement === 'bass') stringCount = 4;
         const offsets = Array.isArray(tuningOffsets) ? tuningOffsets : [0, 0, 0, 0, 0, 0];
         return { hasTuning, arrangement, stringCount, offsets };
     }
@@ -6606,6 +6625,46 @@ function createNoteDetector(options = {}) {
         return applied;
     }
 
+    // Public entry: open the Calibration Wizard for a given instrument and get a
+    // one-shot completion/cancel callback. Used by the input_setup onboarding
+    // wizard (guitar/bass). Thin wrapper over openCalibrationWizard: sets the
+    // instrument context, ensures Detect is on (the measurement steps need live
+    // input), and reports the outcome. Callbacks are assigned AFTER
+    // openCalibrationWizard so its internal pre-close cannot wipe them.
+    function launchCalibration(opts) {
+        opts = opts || {};
+        const onDone = typeof opts.onDone === 'function' ? opts.onDone : null;
+        const onCancel = typeof opts.onCancel === 'function' ? opts.onCancel : null;
+        const forcedInstrument = (opts.instrument === 'guitar' || opts.instrument === 'bass')
+            ? opts.instrument : null;
+        if (forcedInstrument) currentArrangement = forcedInstrument;
+        const start = () => {
+            try {
+                openCalibrationWizard();
+            } catch (e) {
+                if (onCancel) { try { onCancel('error'); } catch (_) { /* isolate */ } }
+                return;
+            }
+            _calWizardOnDone = onDone;
+            _calWizardOnCancel = onCancel;
+            // Set the arrangement override AFTER openCalibrationWizard so its
+            // internal pre-close (calibrationWizardClose) can't wipe it — same
+            // reason the callbacks above are assigned here. Survives
+            // _syncChartStateFromHw's reset-to-guitar on every note-check resolve
+            // while no real song chart is loaded (onboarding standalone).
+            _calWizardForceArrangement = forcedInstrument;
+        };
+        // Measurement steps (noise/signal/notes) need Detect ON. Enable first;
+        // fail-soft — open the wizard regardless so the caller is never stranded.
+        if (!enabled) {
+            let p = null;
+            try { p = enable(); } catch (_) { p = null; }
+            if (p && typeof p.then === 'function') p.then(start, start); else start();
+        } else {
+            start();
+        }
+    }
+
     function _calWizardDeviceLabel() {
         if (!selectedDeviceId) return 'Default system input';
         return `Device ${selectedDeviceId.slice(0, 12)}…`;
@@ -6964,6 +7023,9 @@ function createNoteDetector(options = {}) {
     }
 
     function calibrationWizardClose() {
+        // Capture launchCalibration() callback context before teardown nulls it.
+        const _calHadWizard = !!_calWizardEl;
+        const _calAppliedResult = (_calWizardState && _calWizardState.applied) || null;
         _calWizardStopAllStringsRun('close');
         _calWizardClearPauseRetries();
         _calWizardStopAutoCapture();
@@ -6978,6 +7040,18 @@ function createNoteDetector(options = {}) {
             _calWizardEl = null;
         }
         _calWizardState = null;
+        _calWizardForceArrangement = null;
+        // Fire the one-shot launchCalibration() callbacks: applied settings →
+        // done, otherwise → cancel. Only when a wizard was actually open (so the
+        // open-time pre-close is a no-op).
+        if (_calHadWizard) {
+            const onDone = _calWizardOnDone;
+            const onCancel = _calWizardOnCancel;
+            _calWizardOnDone = null;
+            _calWizardOnCancel = null;
+            if (_calAppliedResult && typeof onDone === 'function') { try { onDone(_calAppliedResult); } catch (_) { /* isolate */ } }
+            else if (typeof onCancel === 'function') { try { onCancel('closed'); } catch (_) { /* isolate */ } }
+        }
     }
 
     function _calWizardDetectBanner(snap) {
@@ -14529,6 +14603,7 @@ function createNoteDetector(options = {}) {
         getCalibrationSnapshot,
         getVerifierRejects,
         openCalibrationWizard,
+        launchCalibration,
         closeCalibrationWizard: calibrationWizardClose,
         openInstrumentCalibrationLab,
         closeInstrumentCalibrationLab: calibrationLabClose,
