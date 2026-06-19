@@ -6635,12 +6635,9 @@ function createNoteDetector(options = {}) {
         opts = opts || {};
         const onDone = typeof opts.onDone === 'function' ? opts.onDone : null;
         const onCancel = typeof opts.onCancel === 'function' ? opts.onCancel : null;
-        if (opts.instrument === 'guitar' || opts.instrument === 'bass') {
-            currentArrangement = opts.instrument;
-            // Survive _syncChartStateFromHw's reset-to-guitar on every note-check
-            // resolve while no real song chart is loaded (onboarding standalone).
-            _calWizardForceArrangement = opts.instrument;
-        }
+        const forcedInstrument = (opts.instrument === 'guitar' || opts.instrument === 'bass')
+            ? opts.instrument : null;
+        if (forcedInstrument) currentArrangement = forcedInstrument;
         const start = () => {
             try {
                 openCalibrationWizard();
@@ -6650,6 +6647,12 @@ function createNoteDetector(options = {}) {
             }
             _calWizardOnDone = onDone;
             _calWizardOnCancel = onCancel;
+            // Set the arrangement override AFTER openCalibrationWizard so its
+            // internal pre-close (calibrationWizardClose) can't wipe it — same
+            // reason the callbacks above are assigned here. Survives
+            // _syncChartStateFromHw's reset-to-guitar on every note-check resolve
+            // while no real song chart is loaded (onboarding standalone).
+            _calWizardForceArrangement = forcedInstrument;
         };
         // Measurement steps (noise/signal/notes) need Detect ON. Enable first;
         // fail-soft — open the wizard regardless so the caller is never stranded.
