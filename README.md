@@ -1,12 +1,12 @@
 # Slopsmith Note Detection Plugin
 
-Real-time pitch detection and scoring for [Slopsmith](https://github.com/got-feedback/feedback) — works on **guitar** (6/7/8-string) and **bass** (4/5-string) arrangements. The active tuning base is selected automatically from the loaded arrangement. Captures audio from your browser's audio input, detects the pitch being played, compares it against the notes on the highway, and shows hit/miss feedback with accuracy scoring. Single notes use YIN/HPS/CREPE pitch detection; chords use a constraint-based per-string energy check that scores how many of a chord's strings are actually ringing.
+Real-time pitch detection and scoring for [Slopsmith](https://github.com/got-feedback/feedBack) — works on **guitar** (6/7/8-string) and **bass** (4/5-string) arrangements. The active tuning base is selected automatically from the loaded arrangement. Captures audio from your browser's audio input, detects the pitch being played, compares it against the notes on the highway, and shows hit/miss feedback with accuracy scoring. Single notes use YIN/HPS/CREPE pitch detection; chords use a constraint-based per-string energy check that scores how many of a chord's strings are actually ringing.
 
 ## Install
 
 ```bash
 cd plugins
-git clone https://github.com/got-feedback/feedback-plugin-notedetect.git note_detect
+git clone https://github.com/got-feedback/feedBack-plugin-notedetect.git note_detect
 # restart Slopsmith
 ```
 
@@ -100,7 +100,7 @@ Other plugins can listen for these `window`-scoped `CustomEvent`s:
 |---|---|---|
 | `notedetect:hit` | A chart note is classified as a clean hit | Full judgment object (includes legacy fields: `{ note, time, noteTime, expectedMidi, detectedMidi, confidence }`) |
 | `notedetect:miss` | A chart note's timing window expires **or** a matched-but-not-clean attempt is classified | Full judgment object (see field reference below) |
-| `notedetect:session` | End of song | aggregate stats for the full run (see [Practice Journal plugin](https://github.com/got-feedback/feedback-plugin-practice) for a consumer) |
+| `notedetect:session` | End of song | aggregate stats for the full run (see [Practice Journal plugin](https://github.com/got-feedback/feedBack-plugin-practice) for a consumer) |
 
 When Slopsmith's event bus is available, the plugin also emits
 `window.slopsmith` events:
@@ -284,7 +284,7 @@ total frames, etc.). Detector knobs are CLI flags
 
 Used for offline tuning + regression testing: change a parameter, re-run,
 diff two JSONs. No browser, no microphone, no human. Pairs naturally with
-[the Note Detect Benchmark sloppak](https://github.com/got-feedback/feedback/tree/main/docs/benchmarks/note_detect_v1)
+[the Note Detect Benchmark sloppak](https://github.com/got-feedback/feedBack/tree/main/docs/benchmarks/note_detect_v1)
 — record yourself once playing the benchmark cleanly, then sweep settings
 against that single recording.
 
