@@ -5,6 +5,12 @@
   "private": false,
   "script": "screen.js",
   "styles": "assets/plugin.css",
-  "settings": { "html": "settings.html" },
-  "routes": "routes.py"
+  "settings": {
+    "html": "settings.html",
+    "category": "mic"
+  },
+  "routes": "routes.py",
+  "category": "audio",
+  "description": "Real-time note detection and scoring from your instrument.",
+  "icon": "assets/thumb.svg"
 }
