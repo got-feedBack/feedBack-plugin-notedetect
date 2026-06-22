@@ -10510,7 +10510,17 @@ function createNoteDetector(options = {}) {
     function injectButton(bar) {
         const controls = bar || document.getElementById('player-controls');
         if (!controls) return;
-        if (detectBtn && controls.contains(detectBtn)) return;
+        // Idempotency: skip if our button is still live in the DOM. We check
+        // isConnected, NOT controls.contains(detectBtn): in v3 the host's
+        // rehome shim MOVES our button out of #player-controls into the
+        // Plugins rail slot (preserving identity + listeners), so a
+        // membership check against `controls` misses the rehomed button and
+        // injects a fresh duplicate on every song switch (the playSong
+        // wrapper re-calls injectButton each song). isConnected is true in
+        // both the in-bar (v2) and rehomed-to-slot (v3) cases, and false only
+        // when a recreated controls row genuinely orphaned the old button —
+        // which is exactly when we DO want to re-inject.
+        if (detectBtn && detectBtn.isConnected) return;
 
         const closeBtn = controls.querySelector(':scope > button:last-of-type');
 
