@@ -2054,6 +2054,15 @@ function createNoteDetector(options = {}) {
     // the summary so the two modals don't stack; _runDeferredSummary()
     // shows it once the consent flow closes.
     let _summaryDeferred = false;
+    // When the host's global "Autoplay & auto-exit" option is on, a natural
+    // song end would otherwise bounce the user back to the menu after a short
+    // grace timer — clobbering this results panel. On song end we claim that
+    // exit via window.slopsmith.holdAutoExit() and stash the returned release
+    // here; dismissing the summary calls it to perform the deferred return
+    // (or drops it, without navigating, when leaving via another path). Null
+    // when the option is off / unavailable, so the legacy "close just hides
+    // the panel, stay on the player" behaviour is preserved.
+    let _ndAutoExitRelease = null;
     // One XP submission per take: set when _endOfSongOnEnded successfully
     // hands the session score to the minigames profile, cleared by
     // resetScoring() (which the playSong wrapper runs on every song switch
@@ -10479,6 +10488,14 @@ function createNoteDetector(options = {}) {
         multiplier = 1;
         maxMultiplier = 1;
         _xpSubmittedTake = false;
+        // A new song supersedes any auto-exit claimed for the previous song's
+        // summary. We only drop our reference — no host cleanup is needed:
+        // the host cancels its own auto-exit on playSong and generation-guards
+        // the release handle, so a stale releaser (e.g. fired by dismissing a
+        // lingering old panel) is an inert no-op and can't navigate the new
+        // song. (The current song's hold is set after this, in
+        // _endOfSongOnEnded.)
+        _ndAutoExitRelease = null;
         noteResults.clear();
         _susActiveUntil.clear();
         _chordLastResult.clear();
@@ -11604,7 +11621,9 @@ function createNoteDetector(options = {}) {
         // now matters: a new song's playSong hook resets hits/misses, so
         // a deferred *re-render* would describe the wrong song.
         try {
-            const built = showSummary(_recArmedForTraining ? { startHidden: true } : undefined);
+            // claimAutoExit: this is the natural song-end summary, so it owns
+            // the host's post-song return (see showSummary / _ndDismissSummary).
+            const built = showSummary({ startHidden: _recArmedForTraining, claimAutoExit: true });
             // Only mark deferred when an overlay was actually built and
             // hidden — a <5-judgment take builds nothing, so there'd be
             // nothing for _runDeferredSummary() to reveal.
@@ -14135,7 +14154,7 @@ function createNoteDetector(options = {}) {
         if (total < 5) return false;
 
         const existing = instanceRoot.querySelector('.nd-summary-overlay');
-        if (existing) existing.remove();
+        if (existing) { existing.remove(); _ndAutoExitRelease = null; }
 
         const accuracy = Math.round((hits / total) * 100);
         const grade = _ndGradeFor(accuracy);
@@ -14229,7 +14248,19 @@ function createNoteDetector(options = {}) {
         // separate top-level nd root in the CSS) themes identically.
         try { overlay.setAttribute('data-nd-skin', _ndLoadSkin()); } catch (e) {}
         overlay.style.pointerEvents = 'auto';
-        overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+        // Single dismiss path: remove the panel and, when we claimed the
+        // host's auto-exit on song end, perform the deferred return to the
+        // menu (navigateHome). Paths that navigate elsewhere themselves
+        // (Return to Previous Song) pass navigateHome=false to drop the hold
+        // without double-navigating. With the option off, _ndAutoExitRelease
+        // is null → this is just the legacy "hide the panel" behaviour.
+        const _ndDismissSummary = (navigateHome) => {
+            overlay.remove();
+            const release = _ndAutoExitRelease;
+            _ndAutoExitRelease = null;
+            if (release && navigateHome) { try { release(); } catch (e) {} }
+        };
+        overlay.onclick = (e) => { if (e.target === overlay) _ndDismissSummary(true); };
         // .nd-sum-shell wraps the (scrollable) panel so the hand-drawn frame
         // overlay (.nd-sum-frame) can sit absolutely over the panel's edges
         // without scrolling with the content.
@@ -14274,14 +14305,26 @@ function createNoteDetector(options = {}) {
             </div>
         `;
         const closeBtn = overlay.querySelector('.nd-summary-close');
-        if (closeBtn) closeBtn.onclick = () => overlay.remove();
+        if (closeBtn) closeBtn.onclick = () => _ndDismissSummary(true);
         const returnPrevBtn = overlay.querySelector('.nd-summary-return-prev');
         if (returnPrevBtn) {
             returnPrevBtn.onclick = () => {
+                // This button does its own navigation, so don't let the
+                // auto-exit releaser fire on success. But keep it as a
+                // fallback: if returning to the previous song fails (resolves
+                // false or throws) the host timer was already cancelled by our
+                // hold, so without this the user is stranded on the ended song
+                // — release it to fall back to the menu.
+                const release = _ndAutoExitRelease;
+                _ndAutoExitRelease = null;
                 overlay.remove();
-                _ndReturnToPreviousSongAfterDiagnostic().catch((e) => {
+                const _fallback = () => { if (release) { try { release(); } catch (e) {} } };
+                _ndReturnToPreviousSongAfterDiagnostic().then((ok) => {
+                    if (!ok) _fallback();
+                }).catch((e) => {
                     console.warn('[note_detect] return to previous song failed:',
                         e && e.message ? e.message : e);
+                    _fallback();
                 });
             };
         }
@@ -14298,6 +14341,19 @@ function createNoteDetector(options = {}) {
         if (opts && opts.startHidden) overlay.style.display = 'none';
         instanceRoot.appendChild(overlay);
         if (!(opts && opts.startHidden)) _animateSummary(overlay, overlay._ndReveal);
+
+        // Host global autoplay/auto-exit handoff: only the natural song-end
+        // summary (claimAutoExit) claims the host's deferred return — so it
+        // fires when the user dismisses this panel (_ndDismissSummary) rather
+        // than after the host's short grace timer would otherwise bounce them
+        // to the menu mid-results. autoplayExit / holdAutoExit are absent on
+        // older cores → legacy behaviour. Manual + disable()-triggered
+        // summaries pass no claimAutoExit and never hold.
+        if (opts && opts.claimAutoExit && window.slopsmith
+            && window.slopsmith.autoplayExit
+            && typeof window.slopsmith.holdAutoExit === 'function') {
+            try { _ndAutoExitRelease = window.slopsmith.holdAutoExit(); } catch (e) {}
+        }
 
         publishToJournal(accuracy);
         return true;
