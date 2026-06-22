@@ -6006,7 +6006,10 @@ function createNoteDetector(options = {}) {
             if (forced && _calWizardForceArrangement === 'bass') stringCount = 4;
         }
         const offsets = Array.isArray(tuningOffsets) ? tuningOffsets : [0, 0, 0, 0, 0, 0];
-        return { hasTuning, arrangement, stringCount, offsets };
+        // `preset` is the standalone instrument the user picked (or null). When
+        // set we know the real open-string notes even with no song loaded, so
+        // labels should show them instead of the generic Low E / Open A.
+        return { hasTuning, arrangement, stringCount, offsets, preset: cfg || null };
     }
 
     function _calWizardOpenStringMidi(stringIndex, ctx) {
@@ -6052,6 +6055,11 @@ function createNoteDetector(options = {}) {
         const mode = (opts && opts.mode === 'all') ? 'all' : 'quick';
         const ctx = _calWizardResolveNoteCheckContext();
         const { hasTuning, stringCount } = ctx;
+        // With a song's tuning OR a chosen standalone instrument preset we know
+        // the real open-string notes, so label them (e.g. "Open low string (B0)")
+        // instead of the generic Low E / Open A fallbacks — otherwise an
+        // extended-range player is told to play the wrong note.
+        const showNote = hasTuning || !!ctx.preset;
         if (mode === 'all') {
             const specs = [];
             for (let s = 0; s < stringCount; s++) {
@@ -6060,7 +6068,7 @@ function createNoteDetector(options = {}) {
                 const expectedNote = _ndMidiToName(expectedMidi);
                 specs.push({
                     id: 'openS' + s,
-                    label: _calWizardOpenStringLabel(s, stringCount, expectedNote, hasTuning),
+                    label: _calWizardOpenStringLabel(s, stringCount, expectedNote, showNote),
                     expectedMidi,
                     expectedNote,
                     string: s,
@@ -6076,8 +6084,8 @@ function createNoteDetector(options = {}) {
             if (!Number.isFinite(expectedMidi)) expectedMidi = def.fallbackMidi;
             const expectedNote = _ndMidiToName(expectedMidi);
             const label = def.string === 0
-                ? (hasTuning ? `Open low string (${expectedNote})` : def.fallbackLabel)
-                : (hasTuning ? `Open 2nd string (${expectedNote})` : def.fallbackLabel);
+                ? (showNote ? `Open low string (${expectedNote})` : def.fallbackLabel)
+                : (showNote ? `Open 2nd string (${expectedNote})` : def.fallbackLabel);
             specs.push({
                 id: def.id,
                 label,
@@ -7511,6 +7519,11 @@ function createNoteDetector(options = {}) {
         if (instrSelect) {
             instrSelect.onchange = () => {
                 if (_calWizardState) {
+                    // Stop any in-flight all-strings run / countdown / auto-capture
+                    // first — otherwise it can land a result for the OLD instrument
+                    // into the freshly reset state after the switch.
+                    _calWizardStopAllStringsRun('switch');
+                    _calWizardStopAutoCapture();
                     _calWizardState.selectedInstrumentConfig = instrSelect.value || null;
                     // Expected open-string notes change with the instrument, so
                     // drop stale per-string + quick-check results.
