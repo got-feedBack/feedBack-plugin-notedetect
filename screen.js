@@ -392,9 +392,22 @@ function _ndVerifyParamsFor(arrangement) {
 // Ibanez/Schecter 8-string standard tuning.
 const _ND_TUNING_BASS_4 = [28, 33, 38, 43];                   // E1 A1 D2 G2
 const _ND_TUNING_BASS_5 = [23, 28, 33, 38, 43];               // B0 E1 A1 D2 G2
+const _ND_TUNING_BASS_6 = [23, 28, 33, 38, 43, 48];           // B0 E1 A1 D2 G2 C3
 const _ND_TUNING_GUITAR_6 = [40, 45, 50, 55, 59, 64];         // E2 A2 D3 G3 B3 E4
 const _ND_TUNING_GUITAR_7 = [35, 40, 45, 50, 55, 59, 64];     // B1 E2 A2 D3 G3 B3 E4
 const _ND_TUNING_GUITAR_8 = [30, 35, 40, 45, 50, 55, 59, 64]; // F#1 B1 E2 A2 D3 G3 B3 E4
+
+// Calibration-wizard instrument presets (standalone, no song to read tuning
+// from). Each maps to an arrangement + stringCount that _ndStandardMidiFor
+// turns into the per-string open-note tuning above.
+const _CAL_WIZARD_INSTRUMENT_CONFIGS = [
+    { id: 'bass-4',   label: '4-string bass',          arrangement: 'bass',   stringCount: 4 },
+    { id: 'bass-5',   label: '5-string bass',          arrangement: 'bass',   stringCount: 5 },
+    { id: 'bass-6',   label: '6-string bass',          arrangement: 'bass',   stringCount: 6 },
+    { id: 'guitar-6', label: '6-string guitar',        arrangement: 'guitar', stringCount: 6 },
+    { id: 'guitar-7', label: '7-string guitar',        arrangement: 'guitar', stringCount: 7 },
+    { id: 'guitar-8', label: '8-string guitar',        arrangement: 'guitar', stringCount: 8 },
+];
 
 function _ndArrangementKindFromName(name) {
     return /bass/i.test(String(name || '')) ? 'bass' : 'guitar';
@@ -402,6 +415,7 @@ function _ndArrangementKindFromName(name) {
 
 function _ndStandardMidiFor(arrangement, stringCount) {
     if (arrangement === 'bass') {
+        if (stringCount === 6) return _ND_TUNING_BASS_6;
         return stringCount === 5 ? _ND_TUNING_BASS_5 : _ND_TUNING_BASS_4;
     }
     if (stringCount === 8) return _ND_TUNING_GUITAR_8;
@@ -5633,6 +5647,9 @@ function createNoteDetector(options = {}) {
             signal: null,
             notes: {},
             allStrings: _calWizardDefaultAllStringsState(),
+            // Standalone instrument preset chosen in the note-detection step
+            // (4/5/6-string bass, 6/7/8-string guitar); null = auto from song.
+            selectedInstrumentConfig: null,
             timing: null,
             recommended: { inputGain: null, latencyOffset: null, reasons: {} },
             applyChecked: { inputGain: true, latencyOffset: true },
@@ -5960,19 +5977,34 @@ function createNoteDetector(options = {}) {
         let info = null;
         try { info = (hw && hw.getSongInfo) ? hw.getSongInfo() : null; } catch (_) {}
         const hasTuning = !!(info && Array.isArray(info.tuning) && info.tuning.length > 0);
-        // No real song tuning (onboarding standalone): _syncChartStateFromHw just
-        // reset currentArrangement to 'guitar', so honor the launchCalibration
-        // override instead of silently calibrating guitar for a bass request.
-        const forced = !hasTuning && _calWizardForceArrangement;
-        const arrangement = forced
-            ? _calWizardForceArrangement
-            : (currentArrangement || 'guitar');
-        // When forcing a standalone arrangement with no host chart, _syncChartStateFromHw
-        // left currentStringCount at the guitar default (6); pick the arrangement's own
-        // default so a bass calibration shows 4 strings, not 6 (two of them blank).
-        let stringCount = (Number.isFinite(currentStringCount) && currentStringCount > 0)
-            ? currentStringCount : 6;
-        if (forced && _calWizardForceArrangement === 'bass') stringCount = 4;
+        // No real song tuning (onboarding standalone). Priority for what to
+        // calibrate: (1) the user's explicit instrument-config dropdown, then
+        // (2) the launchCalibration() arrangement override, else (3) the
+        // guitar default. _syncChartStateFromHw just reset currentArrangement
+        // to 'guitar', so without these overrides a bass/extended-range player
+        // would silently calibrate a 6-string guitar.
+        const cfgId = _calWizardState && _calWizardState.selectedInstrumentConfig;
+        const cfg = (!hasTuning && cfgId)
+            ? _CAL_WIZARD_INSTRUMENT_CONFIGS.find((c) => c.id === cfgId)
+            : null;
+        const forced = !hasTuning && !cfg && _calWizardForceArrangement;
+        let arrangement;
+        let stringCount;
+        if (cfg) {
+            arrangement = cfg.arrangement;
+            stringCount = cfg.stringCount;
+        } else {
+            arrangement = forced
+                ? _calWizardForceArrangement
+                : (currentArrangement || 'guitar');
+            // When forcing a standalone arrangement with no host chart,
+            // _syncChartStateFromHw left currentStringCount at the guitar
+            // default (6); pick the arrangement's own default so a bass
+            // calibration shows 4 strings, not 6 (two of them blank).
+            stringCount = (Number.isFinite(currentStringCount) && currentStringCount > 0)
+                ? currentStringCount : 6;
+            if (forced && _calWizardForceArrangement === 'bass') stringCount = 4;
+        }
         const offsets = Array.isArray(tuningOffsets) ? tuningOffsets : [0, 0, 0, 0, 0, 0];
         return { hasTuning, arrangement, stringCount, offsets };
     }
@@ -7301,6 +7333,21 @@ function createNoteDetector(options = {}) {
         } else if (step === 5) {
             const noteSpecs = _calWizardResolveNoteChecks({ mode: 'quick' });
             const allNoteSpecs = _calWizardResolveNoteChecks({ mode: 'all' });
+            // Standalone (no song): let the player pick their instrument so the
+            // open-string targets cover 5/6-string bass and 7/8-string guitar.
+            const _calCtx = _calWizardResolveNoteCheckContext();
+            const _instrOpts = _CAL_WIZARD_INSTRUMENT_CONFIGS.map((c) =>
+                `<option value="${c.id}"${wiz.selectedInstrumentConfig === c.id ? ' selected' : ''}>${c.label}</option>`
+            ).join('');
+            const instrumentPickerHtml = _calCtx.hasTuning ? '' : `
+                <div class="nd-cal-instrument-picker mb-2 p-2 bg-dark-700 rounded-lg border border-gray-700">
+                    <label class="block text-[11px] text-gray-300 mb-1">Your instrument <span class="text-gray-500">(no song loaded)</span></label>
+                    <select class="nd-cal-instrument-config w-full bg-dark-600 border border-gray-600 rounded px-2 py-1 text-xs text-gray-200">
+                        <option value="">— Auto (6-string guitar) —</option>
+                        ${_instrOpts}
+                    </select>
+                    <p class="text-[9px] text-gray-500 mt-1">Pick a 4/5/6-string bass or 6/7/8-string guitar so the open-string targets match your instrument.</p>
+                </div>`;
             const allStr = wiz.allStrings || _calWizardDefaultAllStringsState();
             const allRunning = !!allStr.running;
             const detailsOpen = !!(allStr.detailsOpen || allStr.running || allStr.complete || allStr.failedId);
@@ -7345,6 +7392,7 @@ function createNoteDetector(options = {}) {
                 <p class="text-gray-300 text-xs mb-2">Quick check that Slopsmith hears open strings. This is simpler than Technique Assessment — just confirms basic detection works.</p>
                 <p class="text-[10px] text-gray-500 mb-2">Targets match the current song tuning. Use the same tone and pitch-shift path you will play the song with.</p>
                 <p class="text-[10px] text-gray-500 mb-2">Load a song first for song tuning in the tuner.</p>
+                ${instrumentPickerHtml}
                 <div class="nd-cal-heard text-cyan-300/90 text-[10px] font-mono mb-2">Now hearing: —</div>
                 <div class="nd-cal-pitch-debug text-[9px] text-gray-500 font-mono mb-1 hidden"></div>
                 <div class="nd-cal-auto-status text-[11px] text-gray-400 mb-2 min-h-[1.5rem]">—</div>
@@ -7456,6 +7504,20 @@ function createNoteDetector(options = {}) {
             runAllStrings.onclick = () => {
                 if (_calWizardState && _calWizardState.allStrings && _calWizardState.allStrings.running) return;
                 _calWizardStartAllStringsRun();
+            };
+        }
+
+        const instrSelect = body.querySelector('.nd-cal-instrument-config');
+        if (instrSelect) {
+            instrSelect.onchange = () => {
+                if (_calWizardState) {
+                    _calWizardState.selectedInstrumentConfig = instrSelect.value || null;
+                    // Expected open-string notes change with the instrument, so
+                    // drop stale per-string + quick-check results.
+                    _calWizardState.allStrings = _calWizardDefaultAllStringsState();
+                    _calWizardState.notes = {};
+                }
+                renderCalibrationWizard();
             };
         }
 
