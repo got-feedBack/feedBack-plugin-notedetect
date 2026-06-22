@@ -136,6 +136,19 @@ function makeSandbox() {
         getLoop() {
             return this._loop;
         },
+        // Host global autoplay/auto-exit contract (slopsmith core exposes
+        // these when the "Autoplay & auto-exit" option ships). Tests flip
+        // `_autoplayExit` and inspect `_holdCount` / `_releaseCount` to
+        // assert the summary claims and performs the return-to-menu.
+        _autoplayExit: false,
+        get autoplayExit() { return this._autoplayExit; },
+        _holdCount: 0,
+        _releaseCount: 0,
+        holdAutoExit() {
+            this._holdCount++;
+            const self = this;
+            return function release() { self._releaseCount++; };
+        },
     };
     // window must reference the sandbox itself so the plugin's
     // `window.playSong = ...` assignments and reads work. Some tests

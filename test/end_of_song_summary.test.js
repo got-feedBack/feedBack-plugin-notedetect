@@ -93,6 +93,57 @@ test('showSummary returns false under 5 judgments, true at 5+', () => {
     det.destroy();
 });
 
+// ── Host autoplay/auto-exit handoff ─────────────────────────────────────
+// When the host's global "Autoplay & auto-exit" option is on, the natural
+// song-end summary claims the host's deferred return (holdAutoExit) so the
+// panel isn't yanked away by the grace timer. Manual / option-off summaries
+// must NOT claim it. (The dismiss→release step is browser-only — the vm's
+// querySelector returns null, so the close handlers aren't wired here.)
+
+function _seedJudgments(det, n) {
+    for (let i = 0; i < n; i++) det._recordJudgment(`k${i}`, _judgment(true));
+}
+
+test('natural song-end summary claims the host auto-exit when the option is on', () => {
+    const core = loadDetectionCore();
+    core.slopsmith._autoplayExit = true;
+    const det = core.createNoteDetector();
+    _seedJudgments(det, 5);
+    assert.equal(det.showSummary({ claimAutoExit: true }), true);
+    assert.equal(core.slopsmith._holdCount, 1, 'held exactly once');
+    det.destroy();
+});
+
+test('summary does not claim auto-exit when the option is off', () => {
+    const core = loadDetectionCore();
+    core.slopsmith._autoplayExit = false;
+    const det = core.createNoteDetector();
+    _seedJudgments(det, 5);
+    assert.equal(det.showSummary({ claimAutoExit: true }), true);
+    assert.equal(core.slopsmith._holdCount, 0, 'no hold when option off');
+    det.destroy();
+});
+
+test('manual showSummary (no claimAutoExit) never claims auto-exit', () => {
+    const core = loadDetectionCore();
+    core.slopsmith._autoplayExit = true;
+    const det = core.createNoteDetector();
+    _seedJudgments(det, 5);
+    assert.equal(det.showSummary(), true); // manual/api path — no opts
+    assert.equal(core.slopsmith._holdCount, 0, 'manual summary leaves auto-exit alone');
+    det.destroy();
+});
+
+test('a bailed (<5 judgments) summary claims nothing', () => {
+    const core = loadDetectionCore();
+    core.slopsmith._autoplayExit = true;
+    const det = core.createNoteDetector();
+    _seedJudgments(det, 4);
+    assert.equal(det.showSummary({ claimAutoExit: true }), false);
+    assert.equal(core.slopsmith._holdCount, 0, 'no overlay built → no hold');
+    det.destroy();
+});
+
 test('notedetect:session carries the game-scoring additions', () => {
     const events = [];
     const core = loadDetectionCore({
