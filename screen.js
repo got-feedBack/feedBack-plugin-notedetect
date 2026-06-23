@@ -7102,7 +7102,7 @@ function createNoteDetector(options = {}) {
         const applied = wiz.applied;
         const appliedParts = [];
         if (applied && applied.inputGain != null) {
-            appliedParts.push(`Input gain ${_calWizardFmtGain(applied.inputGain)}`);
+            appliedParts.push(`Input gain ${_calWizardFmtGain(applied.inputGain)} — your hardest playing now peaks near −12 dBFS, so amps stay clean`);
         }
         if (applied && applied.latencyOffset != null) {
             appliedParts.push(`Detection delay ${_calWizardFmtLatencyMs(applied.latencyOffset)}`);
