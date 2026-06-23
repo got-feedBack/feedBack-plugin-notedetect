@@ -8199,20 +8199,32 @@ function createNoteDetector(options = {}) {
     // (fifth). Reuses the wizard's tuning-aware resolver; falls back to the
     // standard-tuning E5 if no tuning/preset context is available.
     function _calLabPowerChordTargetLabel() {
-        // Pure — read the standard-guitar open tuning (the Lab's default
-        // instrument) without touching live chart/arrangement state. The probe
-        // shape is {s0,f0} (root) + {s1,f2} (fifth); in standard tuning that is
-        // E2 + B2 → an E5 power chord.
+        // Pure — resolve the two probe notes ({s0,f0} root + {s1,f2} fifth) under
+        // the SAME live tuning the Lab scores against (currentArrangement /
+        // currentStringCount / tuningOffsets / capo), so the named chord always
+        // matches what's actually tested (standard guitar → E5; honors a loaded
+        // song's tuning/capo). The "<root>5" chord name is only asserted when the
+        // two notes really are a perfect fifth (7 semitones); exotic tunings
+        // where the fixed s0f0+s1f2 shape isn't a fifth just name the two notes.
+        // Falls back to standard-tuning E5 on any error.
+        let root = 'E2', fifth = 'B2', chord = 'E5';
         try {
-            const base = _ndStandardMidiFor('guitar', 6);
-            if (Array.isArray(base) && Number.isFinite(base[0]) && Number.isFinite(base[1])) {
-                const rootName = _ndMidiToName(base[0]);
-                const fifthName = _ndMidiToName(base[1] + 2);
-                const rootPc = String(rootName).replace(/-?\d+$/, '');
-                return { chord: rootPc + '5', root: rootName, fifth: fifthName };
+            if (currentStringCount >= 2) {
+                const rootMidi = _ndMidiFromStringFret(0, 0, currentArrangement, currentStringCount, tuningOffsets, capo);
+                const fifthMidi = _ndMidiFromStringFret(1, 2, currentArrangement, currentStringCount, tuningOffsets, capo);
+                if (Number.isFinite(rootMidi) && Number.isFinite(fifthMidi)) {
+                    root = _ndMidiToName(rootMidi);
+                    fifth = _ndMidiToName(fifthMidi);
+                    const interval = (((fifthMidi - rootMidi) % 12) + 12) % 12;
+                    chord = interval === 7 ? String(root).replace(/-?\d+$/, '') + '5' : null;
+                }
             }
-        } catch (_) { /* fall through to standard tuning */ }
-        return { chord: 'E5', root: 'E2', fifth: 'B2' };
+        } catch (_) { /* keep standard-tuning fallback */ }
+        const lead = chord ? `the ${chord} power chord` : 'the power chord';
+        const leadHtml = chord
+            ? `the <strong class="text-gray-100">${chord}</strong> power chord`
+            : 'the power chord';
+        return { chord, root, fifth, lead, leadHtml };
     }
 
     function _calLabStartPowerChordAuto(clearFirst) {
@@ -8229,11 +8241,11 @@ function createNoteDetector(options = {}) {
         ar.sessionId = Date.now();
         ar.active = true;
         const pwr = _calLabPowerChordTargetLabel();
-        _calLabBeginCountdownThen(3, `Get ready: play the ${pwr.chord} power chord (${pwr.root} open + next string 2nd fret = ${pwr.fifth})`, () => {
+        _calLabBeginCountdownThen(3, `Get ready: play ${pwr.lead} (${pwr.root} open + next string 2nd fret = ${pwr.fifth})`, () => {
             _calLabRunProbeListenWindow({
                 multiNotes: [{ s: 0, f: 0 }, { s: 1, f: 2 }],
                 technique: 'powerChord',
-                label: `Play the ${pwr.chord} power chord: ${pwr.root} open + ${pwr.fifth} (next string, 2nd fret)`,
+                label: `Play ${pwr.lead}: ${pwr.root} open + ${pwr.fifth} (next string, 2nd fret)`,
                 shortLabel: 'Power chord check',
                 listenMs: _CAL_LAB_AUTO_PWR_LISTEN_MS,
                 intervalMs: _CAL_LAB_AUTO_PWR_INTERVAL_MS,
@@ -9127,7 +9139,7 @@ function createNoteDetector(options = {}) {
             if (st.mode === 'basic') {
                 const busy = _calLabIsAutoBusy(st);
                 const done = st.autoRun && st.autoRun.phase === 'done' && st.autoRun.stepId === 'powerChord';
-                html += `<p class="text-gray-300 text-sm mb-2">Play the <strong class="text-gray-100">${pwrTarget.chord}</strong> power chord — thickest string open (<strong class="text-gray-100">${pwrTarget.root}</strong>) + next string, 2nd fret (<strong class="text-gray-100">${pwrTarget.fifth}</strong>).</p>
+                html += `<p class="text-gray-300 text-sm mb-2">Play ${pwrTarget.leadHtml} — thickest string open (<strong class="text-gray-100">${pwrTarget.root}</strong>) + next string, 2nd fret (<strong class="text-gray-100">${pwrTarget.fifth}</strong>).</p>
                     <p class="text-[10px] text-gray-500 mb-2">Try the dry/clean channel if available to compare against a wet tone.</p>
                     ${_calLabBasicAutoControlsHtml('powerChord', 'Start power-chord check', busy, done)}
                     <div class="nd-cal-lab-auto-status text-[11px] text-gray-300 mb-2 min-h-[2.5rem]"></div>
@@ -9139,7 +9151,7 @@ function createNoteDetector(options = {}) {
                         <button type="button" class="nd-cal-lab-cap-pwr w-full py-2 bg-dark-600 hover:bg-dark-500 rounded text-xs text-gray-200 mb-2 mt-1">Capture power chord (manual)</button>
                     </details>`;
             } else {
-                html += `<p class="text-gray-300 text-xs mb-2">Play the <strong class="text-gray-100">${pwrTarget.chord}</strong> power chord — thickest string open (<strong class="text-gray-100">${pwrTarget.root}</strong>) + next string at the 2nd fret (<strong class="text-gray-100">${pwrTarget.fifth}</strong>). Capture while both ring.</p>
+                html += `<p class="text-gray-300 text-xs mb-2">Play ${pwrTarget.leadHtml} — thickest string open (<strong class="text-gray-100">${pwrTarget.root}</strong>) + next string at the 2nd fret (<strong class="text-gray-100">${pwrTarget.fifth}</strong>). Capture while both ring.</p>
                     <p class="text-[10px] text-gray-500 mb-2">Power chords are tested per string. If the root passes but the fifth fails, the issue is usually masking, distortion, or channel choice — not your timing.</p>
                     <p class="text-[10px] text-gray-500 mb-2">Try the dry/clean channel if available to compare against a wet Spark tone.</p>
                     <button type="button" class="nd-cal-lab-cap-pwr w-full py-2 bg-dark-600 hover:bg-dark-500 rounded text-xs text-gray-200 mb-2">Capture power chord</button>
