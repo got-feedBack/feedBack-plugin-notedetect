@@ -6055,11 +6055,13 @@ function createNoteDetector(options = {}) {
         const mode = (opts && opts.mode === 'all') ? 'all' : 'quick';
         const ctx = _calWizardResolveNoteCheckContext();
         const { hasTuning, stringCount } = ctx;
-        // With a song's tuning OR a chosen standalone instrument preset we know
-        // the real open-string notes, so label them (e.g. "Open low string (B0)")
-        // instead of the generic Low E / Open A fallbacks — otherwise an
-        // extended-range player is told to play the wrong note.
-        const showNote = hasTuning || !!ctx.preset;
+        // Always name the target note so the player knows exactly what to play
+        // (tester feedback: the generic "Low E / Open A" tests were unclear).
+        // We always resolve a concrete expectedMidi below — from the song tuning,
+        // a chosen standalone preset, or the standard-tuning fallback — so the
+        // label can always show it. An extended-range player who hasn't loaded a
+        // song still sees the standard-tuning note and can pick a preset to refine.
+        const showNote = true;
         if (mode === 'all') {
             const specs = [];
             for (let s = 0; s < stringCount; s++) {
@@ -7311,7 +7313,7 @@ function createNoteDetector(options = {}) {
         } else if (step === 2) {
             html = `
                 <p class="text-gray-300 text-xs mb-2">Tune your guitar using the bottom <strong class="text-gray-200">Tuner</strong> panel.</p>
-                <p class="text-[10px] text-gray-500 mb-2">Open Tuner hides this wizard so you can use the tuner. Tap <strong>Return to Calibration Wizard</strong> when done.</p>
+                <p class="text-[10px] text-gray-500 mb-2">The tuner opens automatically and hides this wizard. Tap <strong>Return to Calibration Wizard</strong> when done — or use <strong>Open Tuner</strong> below to reopen it.</p>
                 <p class="text-[10px] text-amber-200/80">If notes miss often later: retune here before continuing.</p>
                 <button type="button" class="nd-cal-open-tuner w-full mb-2 py-2 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-200">Open Tuner</button>
                 <div class="nd-cal-tuner-open-status text-[11px] mb-2 min-h-[1.5rem]"></div>
@@ -7322,7 +7324,7 @@ function createNoteDetector(options = {}) {
                 ${_calWizardDetectBanner(snap)}
                 <p class="text-gray-300 text-xs mb-2">Mute all strings and rest your hands on the strings. The wizard listens automatically after a short countdown.</p>
                 <div class="nd-cal-live-level text-cyan-300/90 text-xs font-mono mb-2">Live: —</div>
-                <div class="nd-cal-auto-status text-[11px] text-gray-400 mb-2 min-h-[2rem]">${nDone
+                <div class="nd-cal-auto-status text-[11px] text-gray-400 mb-2 h-[2.75rem] overflow-y-auto">${nDone
                     ? `Captured: avg ${wiz.noise.avgPct}% · peak ${wiz.noise.peakPct}% · ${_calWizardNoiseStatusDisplay(wiz.noise.status)}`
                     : 'Ready to measure room noise.'}</div>
                 <button type="button" class="nd-cal-start-noise w-full py-2 bg-accent hover:bg-accent-light rounded-lg text-xs font-semibold text-white mb-1">${nDone ? 'Retry Noise Capture' : 'Start Noise Capture'}</button>
@@ -7333,7 +7335,7 @@ function createNoteDetector(options = {}) {
                 ${_calWizardDetectBanner(snap)}
                 <p class="text-gray-300 text-xs mb-2">Play your <strong class="text-gray-200">open low E</strong> at normal playing volume when prompted. Listening starts after the countdown.</p>
                 <div class="nd-cal-live-level text-cyan-300/90 text-xs font-mono mb-2">Live: —</div>
-                <div class="nd-cal-auto-status text-[11px] text-gray-400 mb-2 min-h-[2rem]">${sDone
+                <div class="nd-cal-auto-status text-[11px] text-gray-400 mb-2 h-[2.75rem] overflow-y-auto">${sDone
                     ? `Captured: avg ${wiz.signal.avgPct}% · peak ${wiz.signal.peakPct}% · ${_calWizardSignalStatusDisplay(wiz.signal.status)}`
                     : 'Ready to measure your playing level.'}</div>
                 <button type="button" class="nd-cal-start-signal w-full py-2 bg-accent hover:bg-accent-light rounded-lg text-xs font-semibold text-white mb-1">${sDone ? 'Retry Signal Capture' : 'Start Signal Capture'}</button>
@@ -7401,9 +7403,9 @@ function createNoteDetector(options = {}) {
                 <p class="text-[10px] text-gray-500 mb-2">Targets match the current song tuning. Use the same tone and pitch-shift path you will play the song with.</p>
                 <p class="text-[10px] text-gray-500 mb-2">Load a song first for song tuning in the tuner.</p>
                 ${instrumentPickerHtml}
-                <div class="nd-cal-heard text-cyan-300/90 text-[10px] font-mono mb-2">Now hearing: —</div>
+                <div class="nd-cal-heard text-cyan-300/90 text-[10px] font-mono mb-2 h-[2rem] overflow-y-auto">Now hearing: —</div>
                 <div class="nd-cal-pitch-debug text-[9px] text-gray-500 font-mono mb-1 hidden"></div>
-                <div class="nd-cal-auto-status text-[11px] text-gray-400 mb-2 min-h-[1.5rem]">—</div>
+                <div class="nd-cal-auto-status text-[11px] text-gray-400 mb-2 h-[2.75rem] overflow-y-auto">—</div>
                 <div class="mb-2">${noteRows}</div>
                 ${noteButtons}
                 <details class="nd-cal-all-strings mt-3 mb-2"${detailsOpen ? ' open' : ''}>
@@ -7423,7 +7425,7 @@ function createNoteDetector(options = {}) {
             const playAlongBusy = !!(wiz.playAlong);
             html = `
                 ${_calWizardDetectBanner(snap)}
-                <p class="text-gray-300 text-xs mb-2"><strong class="text-gray-200">Play part of a song</strong> with Detect on so hits are scored. Use a timed test for a clean ${_CAL_WIZARD_TIMED_PLAYALONG_SEC}s sample window, or minimize manually.</p>
+                <p class="text-gray-300 text-xs mb-2"><strong class="text-gray-200">Play part of a song</strong> with Detect on so hits are scored. The wizard minimizes automatically so the song is playable — tap <strong>Return to Calibration Wizard</strong> to come back, or <strong>Start Timed Play-Along Test</strong> for a clean ${_CAL_WIZARD_TIMED_PLAYALONG_SEC}s sample window.</p>
                 <p class="text-[10px] text-gray-500 mb-2">Use the speed you normally practice. This measures input vs chart alignment, not tempo.</p>
                 <div class="nd-cal-timing-median text-gray-300 text-xs mb-2">Your average timing vs chart: —</div>
                 <p class="text-[10px] text-gray-500 mb-2">Live session: ${Number.isFinite(liveMed) ? _ndFormatMs(liveMed) + ' average' : 'not enough hits yet'} · ${liveN} hit samples</p>
@@ -7604,6 +7606,24 @@ function createNoteDetector(options = {}) {
         }
 
         if (step >= 1 && step <= 6) _calWizardRefreshLive();
+
+        // One-shot, per-step-entry reveal of the surface that lives *behind*
+        // this modal (tester feedback: clicking the Tuner panel / the song
+        // highway did nothing because the wizard overlay covers them). On
+        // entering the Tuner step, open the tuner (it minimizes the wizard); on
+        // entering the Timing step, minimize so the highway is clickable. The
+        // guard is set BEFORE firing so the re-render these trigger can't
+        // recurse, and a step that didn't change (e.g. returning from the tuner)
+        // never re-fires.
+        const enteredStep = wiz._autoEnterStep !== step;
+        wiz._autoEnterStep = step;
+        if (enteredStep && !wiz.complete && !wiz.tunerMinimized) {
+            if (step === 2) {
+                _calWizardOpenTunerFromWizard();
+            } else if (step === 6) {
+                _calWizardMinimizeForPlayback();
+            }
+        }
     }
 
     function calibrationWizardNext() {
@@ -8173,6 +8193,40 @@ function createNoteDetector(options = {}) {
         _calLabUpdateBasicAutoButtons();
     }
 
+    // Resolve the concrete power chord the technique check asks for, so the
+    // instruction can name the notes (tester feedback: couldn't tell it wanted
+    // an E5). Power chord = thickest string open (root) + next string 2nd fret
+    // (fifth). Reuses the wizard's tuning-aware resolver; falls back to the
+    // standard-tuning E5 if no tuning/preset context is available.
+    function _calLabPowerChordTargetLabel() {
+        // Pure — resolve the two probe notes ({s0,f0} root + {s1,f2} fifth) under
+        // the SAME live tuning the Lab scores against (currentArrangement /
+        // currentStringCount / tuningOffsets / capo), so the named chord always
+        // matches what's actually tested (standard guitar → E5; honors a loaded
+        // song's tuning/capo). The "<root>5" chord name is only asserted when the
+        // two notes really are a perfect fifth (7 semitones); exotic tunings
+        // where the fixed s0f0+s1f2 shape isn't a fifth just name the two notes.
+        // Falls back to standard-tuning E5 on any error.
+        let root = 'E2', fifth = 'B2', chord = 'E5';
+        try {
+            if (currentStringCount >= 2) {
+                const rootMidi = _ndMidiFromStringFret(0, 0, currentArrangement, currentStringCount, tuningOffsets, capo);
+                const fifthMidi = _ndMidiFromStringFret(1, 2, currentArrangement, currentStringCount, tuningOffsets, capo);
+                if (Number.isFinite(rootMidi) && Number.isFinite(fifthMidi)) {
+                    root = _ndMidiToName(rootMidi);
+                    fifth = _ndMidiToName(fifthMidi);
+                    const interval = (((fifthMidi - rootMidi) % 12) + 12) % 12;
+                    chord = interval === 7 ? String(root).replace(/-?\d+$/, '') + '5' : null;
+                }
+            }
+        } catch (_) { /* keep standard-tuning fallback */ }
+        const lead = chord ? `the ${chord} power chord` : 'the power chord';
+        const leadHtml = chord
+            ? `the <strong class="text-gray-100">${chord}</strong> power chord`
+            : 'the power chord';
+        return { chord, root, fifth, lead, leadHtml };
+    }
+
     function _calLabStartPowerChordAuto(clearFirst) {
         const st = _calLabState;
         if (!st) return;
@@ -8186,11 +8240,12 @@ function createNoteDetector(options = {}) {
         ar.stepId = 'powerChord';
         ar.sessionId = Date.now();
         ar.active = true;
-        _calLabBeginCountdownThen(3, 'Get ready: play a power chord (thickest open + next string 2nd fret)', () => {
+        const pwr = _calLabPowerChordTargetLabel();
+        _calLabBeginCountdownThen(3, `Get ready: play ${pwr.lead} (${pwr.root} open + next string 2nd fret = ${pwr.fifth})`, () => {
             _calLabRunProbeListenWindow({
                 multiNotes: [{ s: 0, f: 0 }, { s: 1, f: 2 }],
                 technique: 'powerChord',
-                label: 'Play a power chord: thickest string open + next string 2nd fret',
+                label: `Play ${pwr.lead}: ${pwr.root} open + ${pwr.fifth} (next string, 2nd fret)`,
                 shortLabel: 'Power chord check',
                 listenMs: _CAL_LAB_AUTO_PWR_LISTEN_MS,
                 intervalMs: _CAL_LAB_AUTO_PWR_INTERVAL_MS,
@@ -9080,10 +9135,11 @@ function createNoteDetector(options = {}) {
                 ? pwrCaps.map((cap, i) => _calLabPowerChordCaptureBlockHtml(cap, i)).join('')
                 : '';
             const simpleDiag = _calLabPowerChordSimpleDiagnosis(st);
+            const pwrTarget = _calLabPowerChordTargetLabel();
             if (st.mode === 'basic') {
                 const busy = _calLabIsAutoBusy(st);
                 const done = st.autoRun && st.autoRun.phase === 'done' && st.autoRun.stepId === 'powerChord';
-                html += `<p class="text-gray-300 text-sm mb-2">Play a power chord: thickest string open + next string 2nd fret.</p>
+                html += `<p class="text-gray-300 text-sm mb-2">Play ${pwrTarget.leadHtml} — thickest string open (<strong class="text-gray-100">${pwrTarget.root}</strong>) + next string, 2nd fret (<strong class="text-gray-100">${pwrTarget.fifth}</strong>).</p>
                     <p class="text-[10px] text-gray-500 mb-2">Try the dry/clean channel if available to compare against a wet tone.</p>
                     ${_calLabBasicAutoControlsHtml('powerChord', 'Start power-chord check', busy, done)}
                     <div class="nd-cal-lab-auto-status text-[11px] text-gray-300 mb-2 min-h-[2.5rem]"></div>
@@ -9095,7 +9151,7 @@ function createNoteDetector(options = {}) {
                         <button type="button" class="nd-cal-lab-cap-pwr w-full py-2 bg-dark-600 hover:bg-dark-500 rounded text-xs text-gray-200 mb-2 mt-1">Capture power chord (manual)</button>
                     </details>`;
             } else {
-                html += `<p class="text-gray-300 text-xs mb-2">Play a power chord: thickest string open + next string at the 2nd fret. Capture while both ring.</p>
+                html += `<p class="text-gray-300 text-xs mb-2">Play ${pwrTarget.leadHtml} — thickest string open (<strong class="text-gray-100">${pwrTarget.root}</strong>) + next string at the 2nd fret (<strong class="text-gray-100">${pwrTarget.fifth}</strong>). Capture while both ring.</p>
                     <p class="text-[10px] text-gray-500 mb-2">Power chords are tested per string. If the root passes but the fifth fails, the issue is usually masking, distortion, or channel choice — not your timing.</p>
                     <p class="text-[10px] text-gray-500 mb-2">Try the dry/clean channel if available to compare against a wet Spark tone.</p>
                     <button type="button" class="nd-cal-lab-cap-pwr w-full py-2 bg-dark-600 hover:bg-dark-500 rounded text-xs text-gray-200 mb-2">Capture power chord</button>
