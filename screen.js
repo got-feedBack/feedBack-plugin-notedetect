@@ -291,7 +291,7 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // exact build that produced it. The script tag has no `import`/`fetch`
 // hook to read package.json at load time, so this is the single
 // hand-maintained constant the diagnostic path keys off of.
-const _ND_VERSION = '1.19.0';
+const _ND_VERSION = '1.20.0';
 
 // Audio processing constants
 const _ND_MIN_YIN_SAMPLES = 4096;  // enough for low E at 48kHz (need tau=585, halfLen=2048)
@@ -2126,6 +2126,18 @@ function createNoteDetector(options = {}) {
             }
         }
     } catch (e) { /* localStorage unavailable */ }
+
+    // Persist the input calibration across the host re-setting the SHARED engine
+    // input gain whenever a tone/preset loads (applyPresetGainLevels) — including
+    // the default tone at startup, which otherwise wipes the calibration on every
+    // restart. Re-assert the calibrated value a few times shortly after load to win
+    // the startup default-tone race; enable() re-applies too (the reliable backstop
+    // when the user turns Detect on to practice). Default instance only, and only
+    // when actually calibrated. (The clean long-term fix is host-side: a persistent
+    // input-calibration stage independent of the per-preset input gain.)
+    if (isDefault && engineInputGain != null) {
+        for (const ms of [800, 2500, 5000]) setTimeout(() => _ndApplyEngineGain(), ms);
+    }
     // Chord window invariant — single-note strict can't exceed chord
     // (a stored chord value smaller than the loaded strict threshold
     // would invert the relationship); and chord can't exceed the outer
