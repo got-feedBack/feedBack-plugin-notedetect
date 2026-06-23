@@ -7313,7 +7313,7 @@ function createNoteDetector(options = {}) {
         } else if (step === 2) {
             html = `
                 <p class="text-gray-300 text-xs mb-2">Tune your guitar using the bottom <strong class="text-gray-200">Tuner</strong> panel.</p>
-                <p class="text-[10px] text-gray-500 mb-2">Open Tuner hides this wizard so you can use the tuner. Tap <strong>Return to Calibration Wizard</strong> when done.</p>
+                <p class="text-[10px] text-gray-500 mb-2">The tuner opens automatically and hides this wizard. Tap <strong>Return to Calibration Wizard</strong> when done — or use <strong>Open Tuner</strong> below to reopen it.</p>
                 <p class="text-[10px] text-amber-200/80">If notes miss often later: retune here before continuing.</p>
                 <button type="button" class="nd-cal-open-tuner w-full mb-2 py-2 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-200">Open Tuner</button>
                 <div class="nd-cal-tuner-open-status text-[11px] mb-2 min-h-[1.5rem]"></div>
@@ -7425,7 +7425,7 @@ function createNoteDetector(options = {}) {
             const playAlongBusy = !!(wiz.playAlong);
             html = `
                 ${_calWizardDetectBanner(snap)}
-                <p class="text-gray-300 text-xs mb-2"><strong class="text-gray-200">Play part of a song</strong> with Detect on so hits are scored. Use a timed test for a clean ${_CAL_WIZARD_TIMED_PLAYALONG_SEC}s sample window, or minimize manually.</p>
+                <p class="text-gray-300 text-xs mb-2"><strong class="text-gray-200">Play part of a song</strong> with Detect on so hits are scored. The wizard minimizes automatically so the song is playable — tap <strong>Return to Calibration Wizard</strong> to come back, or <strong>Start Timed Play-Along Test</strong> for a clean ${_CAL_WIZARD_TIMED_PLAYALONG_SEC}s sample window.</p>
                 <p class="text-[10px] text-gray-500 mb-2">Use the speed you normally practice. This measures input vs chart alignment, not tempo.</p>
                 <div class="nd-cal-timing-median text-gray-300 text-xs mb-2">Your average timing vs chart: —</div>
                 <p class="text-[10px] text-gray-500 mb-2">Live session: ${Number.isFinite(liveMed) ? _ndFormatMs(liveMed) + ' average' : 'not enough hits yet'} · ${liveN} hit samples</p>
@@ -7606,6 +7606,24 @@ function createNoteDetector(options = {}) {
         }
 
         if (step >= 1 && step <= 6) _calWizardRefreshLive();
+
+        // One-shot, per-step-entry reveal of the surface that lives *behind*
+        // this modal (tester feedback: clicking the Tuner panel / the song
+        // highway did nothing because the wizard overlay covers them). On
+        // entering the Tuner step, open the tuner (it minimizes the wizard); on
+        // entering the Timing step, minimize so the highway is clickable. The
+        // guard is set BEFORE firing so the re-render these trigger can't
+        // recurse, and a step that didn't change (e.g. returning from the tuner)
+        // never re-fires.
+        const enteredStep = wiz._autoEnterStep !== step;
+        wiz._autoEnterStep = step;
+        if (enteredStep && !wiz.complete && !wiz.tunerMinimized) {
+            if (step === 2) {
+                _calWizardOpenTunerFromWizard();
+            } else if (step === 6) {
+                _calWizardMinimizeForPlayback();
+            }
+        }
     }
 
     function calibrationWizardNext() {
