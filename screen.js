@@ -2018,6 +2018,16 @@ function createNoteDetector(options = {}) {
     let missMarkerDuration = 2.0;
     let hitGlowDuration = 0.5;
     let inputGain = 1.0;
+    // Calibrated ENGINE input gain (desktop): the input-level wizard sets the
+    // engine source gain (bridge setGain('input', …)) so a hard-played DI peaks at
+    // CAL_TARGET_PEAK (-12 dBFS) — the level the rig_builder amps are built for, so
+    // a hot guitar/bass doesn't clip them on the way in. Distinct from `inputGain`
+    // above, which only scales the browser web-audio analysis path (no amps there).
+    // null until the user calibrates; re-applied on enable so it survives restarts.
+    let engineInputGain = null;
+    // Input-calibration target: hardest playing should peak here. 0.25 = -12 dBFS,
+    // matching the rig_builder amps' vst/src/amps/INPUT_CALIBRATION.md reference.
+    const CAL_TARGET_PEAK = 0.25;
     let selectedDeviceId = '';
     let selectedChannel = 'mono';
     // Detector pipeline latency compensation. 0.080 is the historical
@@ -2101,6 +2111,7 @@ function createNoteDetector(options = {}) {
             if (s.missMarkerDuration !== undefined) missMarkerDuration = Math.max(0.5, Math.min(5, s.missMarkerDuration));
             if (s.hitGlowDuration !== undefined) hitGlowDuration = Math.max(0.1, Math.min(2, s.hitGlowDuration));
             if (Number.isFinite(s.inputGain)) inputGain = Math.max(0.1, Math.min(5, s.inputGain));
+            if (Number.isFinite(s.engineInputGain)) engineInputGain = Math.max(0.1, Math.min(5, s.engineInputGain));
             if (s.latencyOffset !== undefined) latencyOffset = s.latencyOffset;
             // Clamp to the slider's range so a stale persisted value
             // (older build, manual edit) can't put scoring in a state the
@@ -2682,6 +2693,29 @@ function createNoteDetector(options = {}) {
     // *Available helpers gate the bridge path the same way the inline typeof
     // checks used to. `a` is bridgeDesktop.audio.
     function _ndBridgeAudio() { return (bridgeDesktop && bridgeDesktop.audio) || null; }
+    // Resolve the engine audio bridge FRESH — the cached bridgeDesktop is only set
+    // while detection is enabled, but the calibration wizard can run earlier in
+    // onboarding; fall back to the cached handle.
+    function _ndResolveAudioBridge() {
+        const d = (typeof window !== 'undefined') ? window.slopsmithDesktop : null;
+        return (d && d.audio) || _ndBridgeAudio();
+    }
+    // Set the engine input gain live (bridge setGain('input', …)). Used both to
+    // measure at unity during calibration and to apply the calibrated value.
+    // Returns true if the bridge accepted it (i.e. we're on desktop).
+    function _ndSetEngineGain(g) {
+        const a = _ndResolveAudioBridge();
+        if (a && typeof a.setGain === 'function') {
+            try { a.setGain('input', g); return true; } catch (_) { /* best-effort */ }
+        }
+        return false;
+    }
+    // Re-assert the calibrated engine input gain (the wizard's result). No-op
+    // until the user calibrates, or off-desktop.
+    function _ndApplyEngineGain() {
+        if (engineInputGain == null) return false;
+        return _ndSetEngineGain(engineInputGain);
+    }
     // True only when the addon exposes the FULL source-indexed scoring API this
     // instance routes to once bound. Binding a source without these would silently
     // break scoring on a downlevel/partial addon — so we never bind unless ready.
@@ -3027,6 +3061,7 @@ function createNoteDetector(options = {}) {
                 missMarkerDuration,
                 hitGlowDuration,
                 inputGain,
+                engineInputGain,
                 latencyOffset,
                 chordHitRatio,
                 detectionConfidenceMin,
@@ -6132,27 +6167,23 @@ function createNoteDetector(options = {}) {
         return 'good';
     }
 
-    function _calWizardRecommendInputGain(signalStatus, currentGain, signalAvg) {
-        const g = Number.isFinite(currentGain) ? currentGain : 1;
-        if (signalStatus === 'too_low' && g < 5) {
-            const target = Math.min(5, Math.max(1.1, g * 1.2));
-            if (target > g + 0.04) {
-                return {
-                    value: +target.toFixed(2),
-                    reason: `Signal averaged ${Math.round(signalAvg || 0)}% — a modest gain boost may help note detection.`,
-                };
-            }
-        }
-        if (signalStatus === 'too_hot' && g > 1) {
-            const target = Math.max(1, g * 0.85);
-            if (target < g - 0.04) {
-                return {
-                    value: +target.toFixed(2),
-                    reason: 'Signal is hot — lowering input gain reduces clipping risk.',
-                };
-            }
-        }
-        return null;
+    // TARGET-BASED input normalization (replaces the old relative ±nudge): set the
+    // gain so the player's HARDEST playing peaks at CAL_TARGET_PEAK (-12 dBFS), so
+    // every instrument — quiet passive or hot active — lands at the SAME level and
+    // the rig_builder amps stay clean. `signalPeakPct` is the captured peak as a %
+    // of full scale; `measuredAtGain` is the gain it was captured at (1.0 on desktop
+    // where the signal step forces the engine to unity, else the current web gain),
+    // divided out to recover the raw peak before solving for the target.
+    function _calWizardRecommendInputGain(signalStatus, currentGain, signalAvg, signalPeakPct, measuredAtGain) {
+        const measGain = (Number.isFinite(measuredAtGain) && measuredAtGain > 0) ? measuredAtGain : 1;
+        const rawPeak = (Number.isFinite(signalPeakPct) ? signalPeakPct / 100 : 0) / measGain;
+        if (rawPeak < 0.02) return null;   // no real signal captured — don't recommend
+        const target = Math.max(0.1, Math.min(5, CAL_TARGET_PEAK / rawPeak));
+        const pct = Math.round(rawPeak * 100);
+        return {
+            value: +target.toFixed(2),
+            reason: `Hardest playing peaked at ~${pct}% of full scale — set input to ${target.toFixed(2)}× so it lands near −12 dBFS (keeps the amps clean and matches other instruments).`,
+        };
     }
 
     function _calWizardRecommendLatency(medianMs, currentLatencyS) {
@@ -6172,7 +6203,7 @@ function createNoteDetector(options = {}) {
         const rec = { inputGain: null, latencyOffset: null, reasons: {} };
         if (wiz && wiz.signal) {
             const g = _calWizardRecommendInputGain(
-                wiz.signal.status, inputGain, wiz.signal.avgPct);
+                wiz.signal.status, inputGain, wiz.signal.avgPct, wiz.signal.peakPct, wiz._measuredAtGain);
             if (g) {
                 rec.inputGain = g.value;
                 rec.reasons.inputGain = g.reason;
@@ -6287,7 +6318,7 @@ function createNoteDetector(options = {}) {
             };
             const label = _calWizardSignalStatusDisplay(wiz.signal.status);
             let extra = '';
-            const gRec = _calWizardRecommendInputGain(wiz.signal.status, inputGain, avg);
+            const gRec = _calWizardRecommendInputGain(wiz.signal.status, inputGain, avg, peak, wiz._measuredAtGain);
             if (gRec) extra = `<div class="text-gray-400 mt-1">Suggested input gain: ${gRec.value}x</div>`;
             _calWizardSetAutoStatus(
                 `<span class="text-green-300/90">Captured:</span> avg ${avg}% · peak ${peak}% · <span class="font-semibold">${label}</span>${extra}`);
@@ -6367,6 +6398,12 @@ function createNoteDetector(options = {}) {
         }
         const noiseFloor = (wiz.noise && wiz.noise.avgPct) || 3;
         const trigger = noiseFloor + 8;
+        // Measure at UNITY engine gain so the captured peak is the RAW input (the
+        // engine meter is post-gain). On desktop this forces the engine to 1.0 for
+        // the capture; on the browser path there's no engine bridge, so the peak is
+        // read at the current web gain (`inputGain`) instead. Recorded so the
+        // recommendation can divide it back out and solve for CAL_TARGET_PEAK.
+        wiz._measuredAtGain = _ndSetEngineGain(1.0) ? 1.0 : inputGain;
         _calWizardBeginCountdownThen('signal', 3, () => {
             _calWizardStopAutoCapture();
             const samples = [];
@@ -7101,7 +7138,13 @@ function createNoteDetector(options = {}) {
         const rec = wiz.recommended || {};
         if (wiz.applyChecked.inputGain && Number.isFinite(rec.inputGain)) {
             inputGain = Math.max(0.1, Math.min(5, rec.inputGain));
-            if (gainNode) gainNode.gain.value = inputGain;
+            if (gainNode) gainNode.gain.value = inputGain;   // browser analysis path
+            // Desktop: drive the ENGINE input gain — this is the gain that actually
+            // feeds the rig_builder amps + detector and keeps the amps clean (the
+            // web gainNode above only affects browser analysis). Persisted +
+            // re-applied on enable so the calibration survives restarts.
+            engineInputGain = inputGain;
+            _ndApplyEngineGain();
             applied.inputGain = inputGain;
         }
         if (wiz.applyChecked.latencyOffset && Number.isFinite(rec.latencyOffset)) {
@@ -7524,6 +7567,11 @@ function createNoteDetector(options = {}) {
         _calWizardStopAllStringsRun('close');
         _calWizardClearPauseRetries();
         _calWizardStopAutoCapture();
+        // The signal step may have forced the engine input gain to unity to measure
+        // the raw peak. On close, re-assert the calibrated value (the just-applied
+        // one, or the prior one if the user cancelled) so we never leave the engine
+        // stuck at unity. No-op if never calibrated (engineInputGain == null).
+        _ndApplyEngineGain();
         _calWizardStopTimedPlayAlong('close');
         _calWizardReleaseTuner();
         if (_calWizardTick) {
@@ -12801,6 +12849,9 @@ function createNoteDetector(options = {}) {
             return false;
         }
         ensureDrawHook();
+        // Re-assert the calibrated engine input gain (the input-level wizard's
+        // result) so it survives app restarts / a host that re-inits engine gain.
+        _ndApplyEngineGain();
         // Subscribe to slopsmith loop / song events for drill mode.
         // Idempotent — _drillBindEvents bails when already subscribed,
         // so re-enabling after a disable doesn't double-bind. Listeners
@@ -15958,6 +16009,7 @@ function createNoteDetector(options = {}) {
                 if (Number.isFinite(s.chordHitRatio))       chordHitRatio       = s.chordHitRatio;
                 if (Number.isFinite(s.latencyOffset))       latencyOffset       = s.latencyOffset;
                 if (Number.isFinite(s.inputGain))           inputGain           = s.inputGain;
+                if (Number.isFinite(s.engineInputGain))     engineInputGain     = Math.max(0.1, Math.min(5, s.engineInputGain));
                 // Re-enforce timing-threshold invariants at the END of the
                 // setter. A harness caller can legitimately update only
                 // `timingHitThreshold` or `timingTolerance` between scoring
