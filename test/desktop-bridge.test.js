@@ -458,6 +458,50 @@ test('bridge path: destroy mid-scoreChord does not throw and does not record a l
     await flushPendingAsync();
 });
 
+test('bridge path: enable() opens the onboarding-selected input via the audio-input domain', async () => {
+    // The physical input device + input is chosen in the onboarding Input Setup
+    // wizard (audio-input 'select-source'). On the bridge path, note detection
+    // must OPEN that selected source so the native engine captures the device the
+    // user picked (ASIO included) — issued as the 'note_detect' requester.
+    const capCalls = [];
+    const { createNoteDetector } = loadDetectionCore({
+        sandboxBeforeRun(sandbox) {
+            sandbox.navigator.mediaDevices.getUserMedia = () =>
+                Promise.reject(new Error('getUserMedia should not be called on the bridge path'));
+            sandbox.window.slopsmith = Object.assign({}, sandbox.window.slopsmith, {
+                capabilities: {
+                    command: async (domain, command, opts) => {
+                        capCalls.push({ domain, command, requester: opts && opts.requester });
+                        return { outcome: 'handled', status: 'open' };
+                    },
+                },
+            });
+            sandbox.window.slopsmithDesktop = {
+                isDesktop: true,
+                platform: 'linux',
+                audio: {
+                    isAvailable: async () => true,
+                    isAudioRunning: async () => false,
+                    startAudio: async () => {},
+                    getPitchDetection: async () => ({ midiNote: -1, confidence: 0, frequency: -1, cents: 0, noteName: '' }),
+                    getLevels: async () => ({ inputLevel: 0, inputPeak: 0, outputLevel: 0, outputPeak: 0 }),
+                    getSampleRate: async () => 48000,
+                },
+            };
+        },
+    });
+    const det = createNoteDetector({ isDefault: false });
+    await det.enable();
+    await flushPendingAsync();
+    const opens = capCalls.filter((c) => c.domain === 'audio-input' && c.command === 'open-source');
+    assert.ok(opens.length >= 1,
+        'enable() on the bridge path should open the audio-input domain selected source');
+    assert.equal(opens[0].requester, 'note_detect',
+        'open-source should be issued as the note_detect requester');
+    det.destroy();
+    await flushPendingAsync();
+});
+
 // ── Phase 2: raw polyphonic transcription via audio.detectNotes ──────────────
 
 // Build a bridge sandbox whose audio mock exposes detectNotes (the ML
