@@ -2458,7 +2458,11 @@ function createNoteDetector(options = {}) {
         try {
             const res = await caps.command('audio-input', 'open-source', {
                 requester: requesterId,
-                payload: { purpose: purpose || 'note-detection', requiredChannelShape: 'stereo' },
+                // No requiredChannelShape: open the source at its native shape
+                // (the compat check then always passes — mono or stereo device).
+                // Note detection picks its own input channel via the engine's
+                // setSourceInputChannel, independent of the session channel shape.
+                payload: { purpose: purpose || 'note-detection' },
             });
             return !!(res && (res.outcome === 'handled' || res.status === 'open'));
         } catch (_) { return false; }
@@ -6730,17 +6734,19 @@ function createNoteDetector(options = {}) {
             ? opts.instrument : null;
         if (forcedInstrument) currentArrangement = forcedInstrument;
         const start = () => {
-            // Calibration must measure level / channel / latency on the device
-            // the user just picked in the wizard's audio-source step — open the
-            // audio-input domain's selected source (ASIO included) so a selection
-            // made since enable() is the one being calibrated. Best-effort.
-            _ndOpenSelectedInputSource(ND_AUDIO_CAL_REQUESTER, 'calibration');
             try {
                 openCalibrationWizard();
             } catch (e) {
                 if (onCancel) { try { onCancel('error'); } catch (_) { /* isolate */ } }
                 return;
             }
+            // Open AFTER openCalibrationWizard() — its first act is a pre-close
+            // (calibrationWizardClose) that would otherwise drop a ref opened
+            // here. Calibration must measure level / channel / latency on the
+            // device the user just picked in the wizard's audio-source step, so
+            // open the audio-input domain's selected source (ASIO included) — a
+            // selection made since enable() is the one being calibrated.
+            _ndOpenSelectedInputSource(ND_AUDIO_CAL_REQUESTER, 'calibration');
             _calWizardOnDone = onDone;
             _calWizardOnCancel = onCancel;
             // Set the arrangement override AFTER openCalibrationWizard so its
@@ -7137,14 +7143,17 @@ function createNoteDetector(options = {}) {
         }
         _calWizardState = null;
         _calWizardForceArrangement = null;
-        // Release the transient calibration input-source ref. Live detection (if
-        // still enabled) keeps its own ND_AUDIO_REQUESTER ref, so the device
-        // stays open for play; this just drops the calibration hold.
-        _ndCloseSelectedInputSource(ND_AUDIO_CAL_REQUESTER);
         // Fire the one-shot launchCalibration() callbacks: applied settings →
         // done, otherwise → cancel. Only when a wizard was actually open (so the
         // open-time pre-close is a no-op).
         if (_calHadWizard) {
+            // Release the transient calibration input-source ref — ONLY on a real
+            // close (a wizard was open). Guarding on _calHadWizard is essential:
+            // openCalibrationWizard() calls this as a pre-close BEFORE the new
+            // wizard's source is opened, and an unguarded close there would wipe
+            // the fresh calibration ref. Live detection (if still enabled) keeps
+            // its own ND_AUDIO_REQUESTER ref, so the device stays open for play.
+            _ndCloseSelectedInputSource(ND_AUDIO_CAL_REQUESTER);
             const onDone = _calWizardOnDone;
             const onCancel = _calWizardOnCancel;
             _calWizardOnDone = null;
@@ -10075,16 +10084,24 @@ function createNoteDetector(options = {}) {
     async function populateDevices() {
         const sel = document.querySelector('.nd-settings-panel .nd-device-select');
         if (!sel) return;
-        // On desktop, the input device + channel are chosen once in the
-        // onboarding Input Setup wizard (audio-input domain) and note detection
-        // captures through the native engine on that device. A browser device
-        // list here would be misleading — it only enumerates WASAPI inputs (never
-        // ASIO) and is ignored on the native path. Show the managed state instead;
-        // the wizard is the single source of truth (re-run it from Settings).
+        // When note detection actually captures through the native engine, the
+        // input device + channel are chosen once in the onboarding Input Setup
+        // wizard (audio-input domain) — a browser device list here would be
+        // misleading (it only enumerates WASAPI inputs, never ASIO, and is
+        // ignored on the native path), so show the managed state instead.
+        // Gate on the engine being AVAILABLE, not merely "on desktop": if the
+        // native addon failed to load, note detection falls back to getUserMedia
+        // and the user still needs the browser device list to pick an input.
         const caps = (typeof window !== 'undefined') && window.slopsmith && window.slopsmith.capabilities;
-        const onDesktop = !!(typeof window !== 'undefined'
-            && window.slopsmithDesktop && window.slopsmithDesktop.isDesktop);
-        if (onDesktop && caps && typeof caps.command === 'function') {
+        const desktop = (typeof window !== 'undefined') ? window.slopsmithDesktop : null;
+        let nativeManaged = false;
+        if (desktop && desktop.isDesktop && desktop.audio
+            && caps && typeof caps.command === 'function'
+            && typeof desktop.audio.isAvailable === 'function') {
+            try { nativeManaged = !!(await desktop.audio.isAvailable()); }
+            catch (_) { nativeManaged = false; }
+        }
+        if (nativeManaged) {
             sel.innerHTML = '<option value="">Set in Input Setup</option>';
             sel.disabled = true;
             sel.title = 'Your input device and input are chosen in the Input Setup wizard.';
