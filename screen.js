@@ -1885,6 +1885,22 @@ function createNoteDetector(options = {}) {
     let currentSection = null;
     const noteResults = new Map(); // key -> judgment object
 
+    // Position-aware score ledger. One compact entry per COUNTED judgment,
+    // keyed by the SAME key as noteResults (so the two prune in lockstep) but
+    // never garbage-collected — noteResults is pruned for memory (see the gc
+    // interval), so it can't be replayed to rebuild the score after a big
+    // seek-back. This ledger is the source of truth for _recomputeScoreToPosition,
+    // which fires when the player repositions BACKWARD in the song (Restart
+    // button, scrub-back) so the HUD reflects only the notes up to the new
+    // playhead instead of keeping the stale cumulative total. Entry shape:
+    // { t: chart-note time (s), hit: bool, chord: bool }. Cleared in resetScoring().
+    const _scoreLedger = new Map();
+    // song:seek subscription (per-instance, bound from enable(), torn down in
+    // destroy() — survives the per-song silent-disable like the reArm/endOfSong
+    // listeners). See _onSongSeekReposition / _seekResetBindEvents.
+    let seekResetSubscribed = false;
+    let seekResetOnSeekFn = null;
+
     // ── Miss-category diagnostic (#254 follow-up) ─────────────────────
     // Counts WHY a judgment missed so a session report can isolate the
     // dominant failure mode — pure misses → mic/audio chain; chord-partial
@@ -4274,6 +4290,22 @@ function createNoteDetector(options = {}) {
                     drillIterStreak = 0;
                 }
                 drillDirty = true;
+            }
+            // Record this counted judgment in the position-aware ledger so a
+            // backward reposition can rebuild the score (see _scoreLedger /
+            // _recomputeScoreToPosition). Use the chart-note time — noteTime is
+            // populated on every chart-path judgment and the external/contained
+            // paths pass it explicitly; chartNote.t is the fallback. A judgment
+            // with no derivable time (shouldn't happen) is simply not ledgered,
+            // so it can't be rolled back — better than poisoning the ledger with
+            // NaN and dropping a survivor on every recompute.
+            const _ledgerT = Number.isFinite(judgment && judgment.noteTime)
+                ? judgment.noteTime
+                : (judgment && judgment.chartNote && Number.isFinite(judgment.chartNote.t))
+                    ? judgment.chartNote.t
+                    : NaN;
+            if (Number.isFinite(_ledgerT)) {
+                _scoreLedger.set(key, { t: _ledgerT, hit: !!judgment.hit, chord: !!judgment.chord });
             }
         }
         if (emit) dispatchJudgment(judgment);
@@ -10722,6 +10754,7 @@ function createNoteDetector(options = {}) {
         // _endOfSongOnEnded.)
         _ndAutoExitRelease = null;
         noteResults.clear();
+        _scoreLedger.clear();
         _susActiveUntil.clear();
         _chordLastResult.clear();
         _ndVerifierRejects.length = 0;
@@ -10752,6 +10785,106 @@ function createNoteDetector(options = {}) {
     function _resetCalibrationSamples() {
         _diagTimingErrors.length = 0;
         _diagTimingErrorsHits.length = 0;
+    }
+
+    // ── Position-aware score recompute (got-feedback tester report) ────────
+    // When the player repositions BACKWARD in the song — the Restart button
+    // (restartCurrentSong → _audioSeek 'song-restart') or a manual scrub-back —
+    // the live HUD score must reflect only the part of the song up to the new
+    // playhead, not keep the stale cumulative total. (Restart to 0 → 0 notes /
+    // 0%.) Rebuild it from the ledger:
+    //   1. Drop every judgment at/after chart time `t` from the ledger AND the
+    //      display/dedup maps, so replaying forward re-judges those notes (the
+    //      noteResults.has() guards would otherwise skip them) and they re-count
+    //      cleanly instead of double-counting on top of the rolled-back total.
+    //   2. Replay the survivors (notes strictly before `t`) in chart-time order
+    //      through the SAME streak/multiplier/points rules recordJudgment uses,
+    //      so streak, bestStreak, multiplier, maxMultiplier and score are all
+    //      consistent with "as if you'd only played up to here".
+    // updateHUD()'s 33 ms tick picks up the rebuilt counters; no explicit
+    // repaint needed. sectionStats are intentionally left untouched — they feed
+    // the end-of-song summary, not the live HUD, and the ledger doesn't carry
+    // section membership (a known limitation, same as drill-mode cumulation).
+    function _recomputeScoreToPosition(t) {
+        if (!Number.isFinite(t)) return;
+        for (const [key, e] of _scoreLedger) {
+            if (e.t >= t) {
+                _scoreLedger.delete(key);
+                noteResults.delete(key);
+                _susActiveUntil.delete(key);
+                _chordLastResult.delete(key);
+            }
+        }
+        const survivors = Array.from(_scoreLedger.values()).sort((a, b) => a.t - b.t);
+        hits = 0;
+        misses = 0;
+        streak = 0;
+        bestStreak = 0;
+        score = 0;
+        multiplier = 1;
+        maxMultiplier = 1;
+        for (const e of survivors) {
+            if (e.hit) {
+                hits++;
+                streak++;
+                if (streak > bestStreak) bestStreak = streak;
+                multiplier = _ndMultiplierForStreak(streak);
+                if (multiplier > maxMultiplier) maxMultiplier = multiplier;
+                score += (e.chord ? ND_BASE_CHORD : ND_BASE_SINGLE) * multiplier;
+            } else {
+                misses++;
+                streak = 0;
+                multiplier = 1;
+            }
+        }
+    }
+
+    // song:seek handler. Core emits song:seek from its single repositioning
+    // funnel (_audioSeek) with { from, to, reason }. A BACKWARD jump on an
+    // actively-scoring instance rebuilds the score to the new position.
+    function _onSongSeekReposition(e) {
+        // Only an enabled instance has a live HUD worth rebuilding. (Bound
+        // across the per-song silent-disable, so guard here.)
+        if (!enabled) return;
+        const d = (e && e.detail) || {};
+        const to = Number(d.to);
+        if (!Number.isFinite(to)) return;
+        // Drill mode keeps its own per-iteration accounting and the global
+        // score is intentionally cumulative across loop wraps — never recompute
+        // there. The loop-wrap reason is the drill reposition; skip it too as a
+        // belt-and-suspenders guard alongside drillEnabled.
+        if (drillEnabled || d.reason === 'loop-wrap') return;
+        // Only a backward reposition updates the score; a forward seek leaves
+        // earlier judgments intact (the player simply skipped ahead). When the
+        // origin is unknown, treat it as a reposition worth recomputing.
+        const from = Number(d.from);
+        const movedBack = Number.isFinite(from) ? (to < from - 0.05) : true;
+        if (!movedBack) return;
+        _recomputeScoreToPosition(to);
+    }
+
+    function _seekResetBindEvents() {
+        if (seekResetSubscribed) return;
+        if (!window.slopsmith
+            || typeof window.slopsmith.on !== 'function'
+            || typeof window.slopsmith.off !== 'function') return;
+        const fn = _onSongSeekReposition;
+        try {
+            window.slopsmith.on('song:seek', fn);
+        } catch (e) {
+            return;
+        }
+        seekResetOnSeekFn = fn;
+        seekResetSubscribed = true;
+    }
+
+    function _seekResetUnbindEvents() {
+        if (!seekResetSubscribed) return;
+        if (window.slopsmith && typeof window.slopsmith.off === 'function' && seekResetOnSeekFn) {
+            try { window.slopsmith.off('song:seek', seekResetOnSeekFn); } catch (e) {}
+        }
+        seekResetSubscribed = false;
+        seekResetOnSeekFn = null;
     }
 
     // ── Drill mode (slopsmith loop:restart) ───────────────────────────
@@ -12213,7 +12346,9 @@ function createNoteDetector(options = {}) {
         const t = (resolveHw() && hw.getTime) ? hw.getTime() : 0;
         const key = 'ext:' + (Number.isFinite(midi) ? midi : 'x') + ':' + Number(t).toFixed(3) + ':' + (hit ? 'h' : 'm');
         try {
-            recordJudgment(key, { hit: !!hit, detectedMidi: hit && Number.isFinite(midi) ? midi : null, _external: true },
+            // noteTime = the playhead at which this external verdict landed, so
+            // the position-aware ledger can roll it back on a seek-before-t.
+            recordJudgment(key, { hit: !!hit, detectedMidi: hit && Number.isFinite(midi) ? midi : null, noteTime: t, _external: true },
                 { count: true, emit: true });
         } catch (_) {}
     }
@@ -12321,6 +12456,12 @@ function createNoteDetector(options = {}) {
         // the endOfSong/drill bindings it persists across the per-song silent-
         // disable and is only torn down by destroy(); idempotent + default-only.
         _reArmBindEvents();
+        // Bind song:seek so a backward reposition (Restart button / scrub-back)
+        // rebuilds the live score to the new playhead instead of keeping the
+        // stale total. Same persist-across-silent-disable lifecycle; handler
+        // self-gates on `enabled`. NOT default-only — each split panel rebuilds
+        // its own HUD.
+        _seekResetBindEvents();
         // Sync drill state once at enable so a user enabling detection
         // while a loop is already active starts counting iterations
         // from the very next judgment, not after the first HUD tick.
@@ -12537,6 +12678,7 @@ function createNoteDetector(options = {}) {
         _drillUnbindEvents();
         _endOfSongUnbindEvents();
         _reArmUnbindEvents();
+        _seekResetUnbindEvents();
         _chartStateUnbindEvents();
         _recUnbindEvents();
         _unbindAutoRecord();
@@ -15139,6 +15281,14 @@ function createNoteDetector(options = {}) {
         _unbindDrillEvents: _drillUnbindEvents,
         _drillSyncFromLoopState: _drillSyncFromLoopState,
         _recordJudgment: recordJudgment,
+        // Position-aware score-recompute test hooks. _recomputeScoreToPosition
+        // drives the rebuild directly; _bind/_unbindSeekResetEvents let tests
+        // pin the song:seek listener-count contract without going through
+        // enable()'s audio pipeline. Production binds from enable(), unbinds
+        // from destroy().
+        _recomputeScoreToPosition: _recomputeScoreToPosition,
+        _bindSeekResetEvents: _seekResetBindEvents,
+        _unbindSeekResetEvents: _seekResetUnbindEvents,
         // End-of-song summary hooks. Exposed alongside the drill hooks
         // so tests can pin the song:ended listener-count contract
         // (drill alone = 1; drill + end-of-song = 2) without going
