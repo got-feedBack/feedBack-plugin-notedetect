@@ -186,3 +186,79 @@ test('a clean take publishes fullCombo: true', () => {
     assert.equal(session.detail.maxMultiplier, 2);
     det.destroy();
 });
+
+// ── Results-card share helpers (Copy card / Save) ────────────────────────
+
+test('_ndInstrumentLabel title-cases the arrangement and tolerates empties', () => {
+    const core = loadDetectionCore();
+    assert.equal(core.instrumentLabel('rhythm'), 'Rhythm');
+    assert.equal(core.instrumentLabel('Bass'), 'Bass');
+    assert.equal(core.instrumentLabel('  lead  '), 'Lead');
+    assert.equal(core.instrumentLabel(''), '');
+    assert.equal(core.instrumentLabel(null), '');
+    assert.equal(core.instrumentLabel(undefined), '');
+});
+
+test('_ndShareCardText carries title, instrument, accuracy, score (no grade)', () => {
+    const core = loadDetectionCore();
+    const txt = core.shareCardText({
+        title: 'Sample Song', instrument: 'Lead',
+        accuracy: 92, score: 3700, fullCombo: false,
+    });
+    assert.match(txt, /fee\[dB\]ack — Sample Song \(Lead\)/);
+    assert.match(txt, /92%/);
+    assert.match(txt, /3700 pts/);
+    // The letter grade was removed from the card (charrette 2026-06-27).
+    assert.doesNotMatch(txt, /Grade/);
+    assert.doesNotMatch(txt, /Full Combo/);
+});
+
+test('_ndShareCardText appends Full Combo only on a clean run', () => {
+    const core = loadDetectionCore();
+    const txt = core.shareCardText({
+        title: 'Clean One', grade: 'S', accuracy: 100, score: 750, fullCombo: true,
+    });
+    assert.match(txt, /Full Combo/);
+    // No instrument → no parenthetical.
+    assert.doesNotMatch(txt, /\(/);
+});
+
+test('_ndShareCardFilename slugs the title and falls back when empty', () => {
+    const core = loadDetectionCore();
+    assert.equal(core.shareCardFilename({ title: 'Hello, World!' }), 'feedback-hello-world.png');
+    assert.equal(core.shareCardFilename({ title: '' }), 'feedback-score-card.png');
+    assert.equal(core.shareCardFilename({}), 'feedback-score-card.png');
+});
+
+test('_ndSongArtUrl builds a same-origin art URL, preserving DLC path slashes', () => {
+    const core = loadDetectionCore();
+    assert.equal(core.songArtUrl('Bon-Iver_Beth-Rest.sloppak'),
+        '/api/song/Bon-Iver_Beth-Rest.sloppak/art');
+    // Nested DLC path: slashes stay as path separators, segments are encoded.
+    assert.equal(core.songArtUrl('diagnostics-builtin/basic guitar.sloppak'),
+        '/api/song/diagnostics-builtin/basic%20guitar.sloppak/art');
+    assert.equal(core.songArtUrl(''), '');
+    assert.equal(core.songArtUrl(null), '');
+});
+
+// ── Public results-card API (consumed by other plugins, e.g. Virtuoso) ───
+test('noteDetect exposes render/copy/save results-card methods', () => {
+    const core = loadDetectionCore();
+    const det = core.createNoteDetector();
+    assert.equal(typeof det.renderResultsCard, 'function');
+    assert.equal(typeof det.copyResultsCard, 'function');
+    assert.equal(typeof det.saveResultsCard, 'function');
+    det.destroy();
+});
+
+test('renderResultsCard degrades to null with no 2D canvas (headless), no throw', async () => {
+    const core = loadDetectionCore();
+    const det = core.createNoteDetector();
+    // vm sandbox has no real canvas → the renderer must resolve null, not throw.
+    const cv = await det.renderResultsCard({ eyebrow: 'PRACTICED', hero: 'minor pentatonic in C' });
+    assert.equal(cv, null);
+    // copy/save must also degrade without throwing.
+    await assert.doesNotReject(() => det.copyResultsCard({}));
+    await assert.doesNotReject(() => det.saveResultsCard({}));
+    det.destroy();
+});

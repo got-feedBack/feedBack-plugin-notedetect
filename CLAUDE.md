@@ -32,6 +32,28 @@ Scoring-relevant surface:
   (cheap for render loops; absent/invalid → treat as `'neon'`).
 - `showSummary()` — force the results modal (no XP award on this path).
 
+### Reusing the results card from another plugin
+
+The shareable results card is exposed so other plugins (e.g. Virtuoso) reuse
+ONE canonical implementation instead of duplicating it:
+
+- `renderResultsCard(data, opts?)` → `Promise<HTMLCanvasElement|null>` (1200×630).
+- `copyResultsCard(data, opts?)` → `Promise<'copied'|'saved'|'copied-text'|'failed'>`
+  (image→clipboard → download → text ladder).
+- `saveResultsCard(data, opts?)` → `Promise<{ ok, path?, dir?, filename?, fallback? }>`
+  — writes a PNG to the user's configured folder (default: their Pictures
+  folder) via the plugin's `save-card` route; falls back to a browser download.
+
+`data` (all optional): `eyebrow` (default "SONG COMPLETE"), `hero` (or `title`),
+`artist`, `instrument`, `artUrl`, `accuracy`, `score`, `hits`, `misses`,
+`bestStreak`, `maxMultiplier`, `fullCombo`, `sections: [{ name, acc }]`,
+`extraLabel`/`extraValue`, `stats: [{ label, value, color? }]` (overrides the
+default note_detect stat strip — pass this to drive a non-note_detect layout),
+`brand` (footer). `opts.overlayEl` supplies the skin palette (defaults to neon
+when omitted). Same-origin art keeps the canvas untainted; feature-detect
+(`typeof window.noteDetect?.renderResultsCard === 'function'`) and keep a local
+fallback so your plugin still runs when note_detect is absent.
+
 ### Events
 
 All notedetect events are dispatched **twice in the same task**: first on

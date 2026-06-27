@@ -153,6 +153,42 @@ _LIVE_JUDGMENT_MAX_BYTES = 8 * 1024
 # 100× headroom while still bounding pathological cases.
 _LIVE_FILE_MAX_BYTES = 8 * 1024 * 1024
 
+# Results-card PNG save (the "Save" button on the end-of-song card). A
+# 1200×630 card is ~100 KB; 16 MB is absurd headroom while refusing a
+# pathological blob.
+_CARD_MAX_BYTES = 16 * 1024 * 1024
+_CARD_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _default_pictures_dir() -> Path:
+    """The user's Pictures folder — the Save button's default destination.
+    Not guaranteed to exist; the caller mkdirs it."""
+    return Path.home() / "Pictures"
+
+
+def _resolve_card_dir(raw: str) -> Path:
+    """Target directory for a saved card: the user-configured folder
+    (settings) when given, else the default Pictures folder. A supplied
+    path must be absolute — a relative path would resolve against the
+    server's CWD, not anywhere the user expects."""
+    raw = (raw or "").strip()
+    if not raw:
+        return _default_pictures_dir()
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        raise HTTPException(400, "save folder must be an absolute path")
+    return p
+
+
+def _sanitize_card_filename(name: str) -> str:
+    # Reduce to a bare, filesystem-safe .png basename — never a path, so a
+    # client can't write outside the resolved directory via the name.
+    base = Path(str(name or "")).name
+    base = _CARD_NAME_RE.sub("-", base).strip("-_.") or "score-card"
+    if not base.lower().endswith(".png"):
+        base = re.sub(r"\.[^.]*$", "", base) + ".png"
+    return base[:80]
+
 
 def _parse_pcloud_code(upload_url: str | None) -> str | None:
     """Extract the pCloud upload-link code from a user-supplied string.
@@ -627,6 +663,36 @@ def setup(app, context):
             "bundle_filename": bundle_name,
             "bytes": bundle_size,
             "pcloud_result": pcloud_result,
+        }
+
+    @app.post("/api/plugins/note_detect/save-card")
+    async def save_card(request: Request):
+        # Body: raw PNG bytes (the results card the browser rendered on a
+        # canvas). Query: ?dir=<absolute folder>&name=<filename>. Writes the
+        # PNG to the user's configured folder (default: their Pictures
+        # folder) and returns the absolute path so the UI can confirm it.
+        # Works in both the web testbed and the desktop bundle since both
+        # run this local server as the user.
+        body = await _read_capped_body(request, _CARD_MAX_BYTES)
+        if not body or body[:8] != b"\x89PNG\r\n\x1a\n":
+            raise HTTPException(400, "body is not a PNG image")
+        target = _resolve_card_dir(request.query_params.get("dir", ""))
+        name = _sanitize_card_filename(request.query_params.get("name", "score-card.png"))
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            path = target / name
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_bytes(body)
+            tmp.replace(path)
+        except OSError as e:
+            raise HTTPException(500, f"could not save card to {target}: {e}")
+        log.info("saved results card (%d bytes) to %s", len(body), str(path))
+        return {
+            "ok": True,
+            "path": str(path),
+            "dir": str(target),
+            "filename": name,
+            "bytes": len(body),
         }
 
     @app.get("/api/plugins/note_detect/config")

@@ -291,7 +291,7 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // exact build that produced it. The script tag has no `import`/`fetch`
 // hook to read package.json at load time, so this is the single
 // hand-maintained constant the diagnostic path keys off of.
-const _ND_VERSION = '1.15.3';
+const _ND_VERSION = '1.19.0';
 
 // Audio processing constants
 const _ND_MIN_YIN_SAMPLES = 4096;  // enough for low E at 48kHz (need tau=585, halfLen=2048)
@@ -644,6 +644,354 @@ function _ndGradeFor(accuracy) {
         : accuracy >= 70 ? 'C'
         : accuracy >= 60 ? 'D'
         : 'F';
+}
+
+// ── Results-card share image (Copy card / Save) ──────────────────────────
+// A shareable PNG of the end-of-song results, rendered in note_detect's own
+// skin (palette + display fonts read live off the overlay), NOT the host's.
+// Mirrors the robust host-checked fallback ladder used elsewhere in the
+// ecosystem: image→clipboard → download PNG → text.
+
+// Human label for an arrangement string (the "instrument / track" played).
+// getSongInfo().arrangement is a free-form chart label ('Lead', 'Bass',
+// 'rhythm', …) — title-case the leading word so it reads on the card.
+function _ndInstrumentLabel(arrangement) {
+    if (!arrangement) return '';
+    const s = String(arrangement).trim();
+    if (!s) return '';
+    return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+// Same-origin album-art URL for a song filename. Mirrors the host's
+// quote(filename, safe='/') so nested DLC paths (a/b.sloppak) resolve, and
+// stays same-origin so the share canvas isn't tainted. '' when no filename.
+// Returns 404 for art-less songs — callers must handle the load failure.
+function _ndSongArtUrl(filename) {
+    if (!filename) return '';
+    return '/api/song/' + String(filename).split('/').map(encodeURIComponent).join('/') + '/art';
+}
+
+// Results "text glow" A/B setting (standalone key so the card reads it
+// directly). Off by default — the glow bled into the digits (readability).
+function _ndResultsGlowOn() {
+    try { return localStorage.getItem('slopsmith_notedetect_results_glow') === '1'; }
+    catch (e) { return false; }
+}
+
+// User-configured folder the Save button writes to ('' → server default =
+// the user's Pictures folder).
+function _ndSaveDir() {
+    try { return (localStorage.getItem('slopsmith_notedetect_save_dir') || '').trim(); }
+    catch (e) { return ''; }
+}
+
+// Transient skin-themed toast (used for "Saved to …"). Self-removing.
+function _ndToast(message, ms) {
+    if (typeof document === 'undefined' || !document.body) return;
+    try {
+        const t = document.createElement('div');
+        t.className = 'nd-toast';
+        try { t.setAttribute('data-nd-skin', _ndLoadSkin()); } catch (e) {}
+        t.textContent = String(message == null ? '' : message);
+        document.body.appendChild(t);
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(() => { try { t.classList.add('nd-toast-in'); } catch (e) {} });
+        } else { t.classList.add('nd-toast-in'); }
+        setTimeout(() => {
+            try { t.classList.remove('nd-toast-in'); } catch (e) {}
+            setTimeout(() => { try { t.remove(); } catch (e) {} }, 400);
+        }, ms || 6000);
+    } catch (e) {}
+}
+
+// Clipboard text fallback (when image copy + download both fail).
+function _ndShareCardText(data) {
+    const d = data || {};
+    const what = d.title || 'My run';
+    const inst = d.instrument ? ` (${d.instrument})` : '';
+    const tail = [`${d.accuracy}%`, `${d.score} pts`];
+    if (d.fullCombo) tail.push('Full Combo');
+    return `fee[dB]ack — ${what}${inst}\n${tail.join(' · ')}`;
+}
+
+// Download filename — slugged from the song title.
+function _ndShareCardFilename(data) {
+    const d = data || {};
+    const base = String(d.title || 'score-card')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 48) || 'score-card';
+    return `feedback-${base}.png`;
+}
+
+// Render the results into a 1200×630 canvas using the live skin. Returns the
+// canvas, or null when canvas/2d isn't available (vm sandbox / old host).
+async function _ndRenderShareCard(data, overlayEl) {
+    const d = data || {};
+    if (typeof document === 'undefined' || !document.createElement) return null;
+    const cv = document.createElement('canvas');
+    cv.width = 1200; cv.height = 630;
+    const ctx = cv.getContext && cv.getContext('2d');
+    if (!ctx) return null;
+    // The bundled display fonts (Orbitron / Rajdhani / Russo One / Black Ops
+    // One) are document-loaded by the stylesheet; wait so the canvas text
+    // matches the on-screen card instead of falling back to a system font.
+    try { if (document.fonts && document.fonts.ready) await document.fonts.ready; } catch (e) {}
+
+    // Album art (optional) — same-origin so toBlob() stays untainted. Resolves
+    // null on a 404 (art-less song) or any load error; the card just omits it.
+    let artImg = null;
+    if (d.artUrl) {
+        try {
+            artImg = await new Promise((res) => {
+                const im = new Image();
+                im.onload = () => res(im.naturalWidth ? im : null);
+                im.onerror = () => res(null);
+                im.src = d.artUrl;
+            });
+        } catch (e) { artImg = null; }
+    }
+
+    // Resolve the active skin's palette + fonts off the overlay's computed
+    // style (it carries data-nd-skin), with the neon defaults as fallback.
+    const cssVar = (name, fallback) => {
+        try {
+            if (overlayEl && typeof getComputedStyle === 'function') {
+                const v = getComputedStyle(overlayEl).getPropertyValue(name).trim();
+                if (v) return v;
+            }
+        } catch (e) {}
+        return fallback;
+    };
+    const accent  = cssVar('--nd-accent',  '#00f0ff');
+    const accent2 = cssVar('--nd-accent2', '#ff2ec4');
+    const hit     = cssVar('--nd-hit',     '#00ff88');
+    const miss    = cssVar('--nd-miss',    '#ff4444');
+    const text    = cssVar('--nd-text',    '#e8f6ff');
+    const dim     = cssVar('--nd-dim',     '#7c93a8');
+    const warn    = cssVar('--nd-warn',    '#ffcc00');
+    const bg      = cssVar('--nd-bg',      'rgba(6,10,24,0.82)');
+    const fDisp   = cssVar('--nd-font-display', "'Orbitron', sans-serif");
+
+    const W = 1200, H = 630, P = 72;
+    const font = (px, stack, weight) => { ctx.font = `${weight || 700} ${px}px ${stack}`; };
+    const fit = (s, maxW) => {
+        s = String(s == null ? '' : s);
+        if (ctx.measureText(s).width <= maxW) return s;
+        let t = s;
+        while (t.length > 1 && ctx.measureText(t + '…').width > maxW) t = t.slice(0, -1);
+        return t + '…';
+    };
+    const spaced = (px) => { try { ctx.letterSpacing = px + 'px'; } catch (e) {} };
+
+    // Opaque base first (--nd-bg can be translucent → no see-through PNG).
+    ctx.fillStyle = '#0a0e1a'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = accent; ctx.fillRect(0, 0, W, 6);                 // accent spine
+    ctx.strokeStyle = 'rgba(255,255,255,0.10)'; ctx.lineWidth = 1;
+    ctx.strokeRect(28.5, 28.5, W - 57, H - 57);                       // hairline frame
+    ctx.textBaseline = 'alphabetic';
+
+    // Optional text glow (A/B setting) — off by default for legibility.
+    const glow = _ndResultsGlowOn();
+    const glowSet = (color) => { if (glow) { ctx.shadowColor = color; ctx.shadowBlur = 16; } };
+    const glowClear = () => { ctx.shadowBlur = 0; ctx.shadowColor = 'transparent'; };
+
+    // Album art (top-right) — same-origin, cover-fit, accent-framed.
+    const A = 190, artX = W - P - A, artY = 64, artR = 14;
+    if (artImg) {
+        ctx.save();
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(artX, artY, A, A, artR); else ctx.rect(artX, artY, A, A);
+        ctx.closePath(); ctx.clip();
+        const iw = artImg.naturalWidth, ih = artImg.naturalHeight;
+        const s = Math.max(A / iw, A / ih), dw = iw * s, dh = ih * s;
+        ctx.drawImage(artImg, artX + (A - dw) / 2, artY + (A - dh) / 2, dw, dh);
+        ctx.restore();
+        ctx.strokeStyle = accent; ctx.lineWidth = 2;
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(artX + 1, artY + 1, A - 2, A - 2, artR); else ctx.rect(artX + 1, artY + 1, A - 2, A - 2);
+        ctx.stroke();
+    }
+    const leftMaxW = (artImg ? artX - 28 : W - P) - P;
+
+    // Eyebrow + hero title + sub (top-left). eyebrow/hero are overridable so
+    // another plugin can drive the same card with its own labels.
+    spaced(6); ctx.fillStyle = dim; font(20, fDisp, 700);
+    ctx.fillText(String(d.eyebrow || 'SONG COMPLETE').toUpperCase(), P, 92); spaced(0);
+    let heroSize = 64; font(heroSize, fDisp, 800);
+    const heroText = d.hero || d.title || 'Song Complete';
+    if (ctx.measureText(heroText).width > leftMaxW) { heroSize = 48; font(heroSize, fDisp, 800); }
+    glowSet(text); ctx.fillStyle = text; ctx.fillText(fit(heroText, leftMaxW), P, 156); glowClear();
+    const sub = [d.artist, d.instrument].filter(Boolean).join('   ·   ');
+    if (sub) { spaced(2); ctx.fillStyle = dim; font(24, fDisp, 500); ctx.fillText(fit(sub.toUpperCase(), leftMaxW), P, 196); spaced(0); }
+
+    // Full-combo badge — right-aligned under the art (top-right with no art).
+    if (d.fullCombo) {
+        spaced(4); glowSet(hit); ctx.fillStyle = hit; font(22, fDisp, 700);
+        const fcW = ctx.measureText('★ FULL COMBO').width + 4 * 11;
+        ctx.fillText('★ FULL COMBO', W - P - fcW, artImg ? artY + A + 36 : 150);
+        glowClear(); spaced(0);
+    }
+
+    // Per-section accuracy — a vertical list of % meters (name · bar · %).
+    // Colour bands stay positive: green / cyan / amber, never a failure red.
+    const secs = Array.isArray(d.sections) ? d.sections.slice(0, 5) : [];
+    if (secs.length) {
+        spaced(3); ctx.fillStyle = dim; font(15, fDisp, 600);
+        ctx.fillText('SECTIONS', P, 252); spaced(0);
+        const barX = P + 160, barW = 320, rowH = 36;
+        let y = 292;
+        for (const sec of secs) {
+            const acc = Math.max(0, Math.min(100, Math.round(sec.acc)));
+            const barColor = acc >= 90 ? hit : warn;   // green only at 90%+, else amber
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = text; font(18, fDisp, 600);
+            ctx.fillText(fit(sec.name, 140), P, y);
+            ctx.fillStyle = 'rgba(255,255,255,0.10)';      // track
+            if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(barX, y - 7, barW, 14, 7); ctx.fill(); }
+            else ctx.fillRect(barX, y - 7, barW, 14);
+            ctx.fillStyle = barColor;                       // fill
+            const fw = Math.max(8, barW * acc / 100);
+            if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(barX, y - 7, fw, 14, 7); ctx.fill(); }
+            else ctx.fillRect(barX, y - 7, fw, 14);
+            glowSet(barColor); ctx.fillStyle = barColor; font(18, fDisp, 700);
+            ctx.fillText(acc + '%', barX + barW + 16, y); glowClear();
+            y += rowH;
+        }
+        ctx.textBaseline = 'alphabetic';
+    }
+
+    // Stat strip across the bottom — note counts as fractions of judged total.
+    // A consumer may override the whole strip via d.stats [{label,value,color?}].
+    const total = (d.hits || 0) + (d.misses || 0);
+    const stats = (Array.isArray(d.stats) && d.stats.length) ? d.stats.slice(0, 6) : [
+        { label: 'ACCURACY',    value: d.accuracy + '%',          color: text },
+        { label: 'SCORE',       value: String(d.score),           color: accent },
+        { label: 'HITS',        value: d.hits + '/' + total,      color: hit },
+        { label: (d.extraLabel || 'Top Section').toUpperCase(), value: d.extraValue || '—', color: accent },
+        { label: 'BEST STREAK', value: String(d.bestStreak),      color: text },
+        { label: 'MAX MULT',    value: '×' + d.maxMultiplier,     color: accent2 },
+    ];
+    const colW = (W - P * 2) / stats.length;
+    const sy = 520;
+    stats.forEach((st, i) => {
+        const x = P + colW * i;
+        const col = st.color || text;
+        spaced(2); ctx.fillStyle = dim; font(15, fDisp, 600);
+        ctx.fillText(String(st.label || '').toUpperCase(), x, sy); spaced(0);
+        glowSet(col); ctx.fillStyle = col; font(36, fDisp, 700);
+        ctx.fillText(fit(String(st.value == null ? '' : st.value), colW - 14), x, sy + 46); glowClear();
+    });
+
+    // Footer brand (overridable for a consuming plugin).
+    spaced(2); ctx.fillStyle = dim; font(16, fDisp, 500);
+    ctx.fillText(String(d.brand || 'FEE[dB]ACK · NOTE DETECTION'), P, H - 26); spaced(0);
+    return cv;
+}
+
+// Copy/download with the host-checked fallback ladder: image→clipboard (kept
+// a live Promise so the click activation survives) → download PNG → text.
+// Returns 'copied' | 'saved' | 'copied-text' | 'failed'.
+async function _ndShareCardAction(data, action, overlayEl) {
+    const cv = await _ndRenderShareCard(data, overlayEl);
+    if (!cv || !cv.toBlob) {
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(_ndShareCardText(data)); return 'copied-text';
+            }
+        } catch (e) {}
+        return 'failed';
+    }
+    const toBlob = () => new Promise((r) => cv.toBlob(r, 'image/png'));
+    const download = async () => {
+        const b = await toBlob(); if (!b) return false;
+        const url = URL.createObjectURL(b);
+        const a = document.createElement('a');
+        a.href = url; a.download = _ndShareCardFilename(data);
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => { try { URL.revokeObjectURL(url); } catch (e) {} }, 4000);
+        return true;
+    };
+    if (action === 'download') {
+        try { if (await download()) return 'saved'; } catch (e) {}
+    } else {
+        try {
+            if (navigator.clipboard && window.ClipboardItem && window.isSecureContext) {
+                await navigator.clipboard.write([new window.ClipboardItem({ 'image/png': toBlob() })]);
+                return 'copied';
+            }
+        } catch (e) {}
+        try { if (await download()) return 'saved'; } catch (e) {}
+    }
+    try { await navigator.clipboard.writeText(_ndShareCardText(data)); return 'copied-text'; } catch (e) {}
+    return 'failed';
+}
+
+// Save the rendered card to disk. Preferred path: POST the PNG to the plugin
+// backend, which writes it to the user's configured folder (default: their
+// Pictures folder) and returns the absolute path. Falls back to a normal
+// browser download if the backend route isn't reachable. Returns
+// { ok, path?, dir?, filename?, fallback? }.
+async function _ndSaveCard(data, overlayEl) {
+    const cv = await _ndRenderShareCard(data, overlayEl);
+    if (!cv || !cv.toBlob) return { ok: false };
+    const blob = await new Promise((r) => cv.toBlob(r, 'image/png'));
+    if (!blob) return { ok: false };
+    const name = _ndShareCardFilename(data);
+    const dir = _ndSaveDir();
+    try {
+        const qs = '?name=' + encodeURIComponent(name) + (dir ? '&dir=' + encodeURIComponent(dir) : '');
+        const resp = await fetch('/api/plugins/note_detect/save-card' + qs, {
+            method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob,
+        });
+        if (resp && resp.ok) {
+            const j = await resp.json().catch(() => null);
+            if (j && j.ok) return { ok: true, path: j.path, dir: j.dir, filename: j.filename };
+        }
+    } catch (e) { /* fall through to browser download */ }
+    // Fallback: browser download (server route unavailable).
+    try {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = name;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => { try { URL.revokeObjectURL(url); } catch (e) {} }, 4000);
+        return { ok: true, fallback: true, filename: name };
+    } catch (e) {}
+    return { ok: false };
+}
+
+// Click handler for Copy card / Save — gives transient in-button feedback,
+// plus a 6 s "Saved to …" toast on the Save path.
+async function _ndShareCardClick(btn, action, data, overlayEl) {
+    if (!btn) return;
+    const orig = btn.textContent;
+    btn.disabled = true;
+    if (action === 'download') {
+        btn.textContent = 'Saving…';
+        let res = { ok: false };
+        try { res = await _ndSaveCard(data, overlayEl); } catch (e) {}
+        if (res.ok && !res.fallback) {
+            btn.textContent = 'Saved ✓';
+            _ndToast('Saved to ' + (res.dir || res.path || 'disk'), 6000);
+        } else if (res.ok && res.fallback) {
+            btn.textContent = 'Saved ✓';
+            _ndToast('Saved ' + (res.filename || 'card') + ' to your browser downloads', 6000);
+        } else {
+            btn.textContent = 'Couldn’t save';
+        }
+        setTimeout(() => { if (btn.isConnected) { btn.textContent = orig; btn.disabled = false; } }, 1600);
+        return;
+    }
+    let res = 'failed';
+    try { res = await _ndShareCardAction(data, 'copy', overlayEl); } catch (e) {}
+    btn.textContent = res === 'copied' ? 'Copied ✓'
+        : res === 'saved' ? 'Saved ✓'
+        : res === 'copied-text' ? 'Copied text ✓'
+        : 'Couldn’t copy';
+    setTimeout(() => { if (btn.isConnected) { btn.textContent = orig; btn.disabled = false; } }, 1600);
 }
 
 function _ndMakeJudgment(opts) {
@@ -14541,22 +14889,134 @@ function createNoteDetector(options = {}) {
         const grade = _ndGradeFor(accuracy);
         const fullCombo = misses === 0;
 
+        // Song identity for the card + the shareable image. Captured at BUILD
+        // time: by the time the user taps a button the host may have navigated
+        // and getSongInfo() would return {}. arrangement_index + filename feed
+        // the Retry path (same song, same instrument).
+        const _summaryHw = resolveHw();
+        const _summaryInfo = (_summaryHw && _summaryHw.getSongInfo)
+            ? (_summaryHw.getSongInfo() || {}) : {};
+        const songTitle = _summaryInfo.title ? String(_summaryInfo.title) : '';
+        const songArtist = _summaryInfo.artist ? String(_summaryInfo.artist) : '';
+        const instrument = _ndInstrumentLabel(_summaryInfo.arrangement);
+        const arrangementIndex = Number.isFinite(_summaryInfo.arrangement_index)
+            ? _summaryInfo.arrangement_index : undefined;
+        const retryFilename = _ndShared.currentFilename || '';
+        const canRetry = !!retryFilename && typeof window.playSong === 'function';
+        const artUrl = _ndSongArtUrl(retryFilename);
+        // Section time ranges (for the per-section "Practice This Section"
+        // loop buttons). Captured now from the live highway — getSections()
+        // returns [{time,name}] in chart order; a section's end is the next
+        // section's start (or the song's end). First occurrence wins for a
+        // repeated name (sectionStats dedupes by name).
+        const _hwSections = (_summaryHw && _summaryHw.getSections)
+            ? (_summaryHw.getSections() || []) : [];
+        const _sectionRange = (name) => {
+            for (let i = 0; i < _hwSections.length; i++) {
+                if (!_hwSections[i] || _hwSections[i].name !== name) continue;
+                const start = Number(_hwSections[i].time);
+                if (!Number.isFinite(start)) return null;
+                let end = (i + 1 < _hwSections.length) ? Number(_hwSections[i + 1].time) : NaN;
+                if (!Number.isFinite(end) || end <= start) {
+                    let d = Number(_summaryInfo.duration) || 0;
+                    if (d > 6000) d /= 1000;
+                    end = (d > start) ? d : start + 30;
+                }
+                return { start, end };
+            }
+            return null;
+        };
+        const shareSections = sectionStats.map((s) => {
+            const t = s.hits + s.misses;
+            return { name: s.name, acc: t > 0 ? Math.round((s.hits / t) * 100) : 0 };
+        });
+        // Positive replacement for the (punishing) Misses cell: your best
+        // section → else the song length → else the note total. `extraValue`
+        // is the compact form for the share strip; `extraValueFull` carries
+        // the section name where the popup has room.
+        let _topSec = null;
+        for (const s of sectionStats) {
+            const t = s.hits + s.misses;
+            if (t <= 0) continue;
+            const acc = Math.round((s.hits / t) * 100);
+            if (!_topSec || acc > _topSec.acc) _topSec = { name: s.name, acc };
+        }
+        let _durSec = Number(_summaryInfo.duration) || 0;
+        if (_durSec > 6000) _durSec /= 1000;   // guard ms vs s (no song is >100 min)
+        const _fmtDur = (n) => {
+            n = Math.max(0, Math.round(n));
+            return Math.floor(n / 60) + ':' + String(n % 60).padStart(2, '0');
+        };
+        let extraLabel, extraValue, extraValueFull;
+        if (_topSec) {
+            extraLabel = 'Top Section';
+            extraValue = _topSec.name;        // share card: section name
+            extraValueFull = _topSec.name;    // popup: section name too (was name · %)
+        } else if (_durSec > 0) {
+            extraLabel = 'Length'; extraValue = _fmtDur(_durSec); extraValueFull = extraValue;
+        } else {
+            extraLabel = 'Notes'; extraValue = String(total); extraValueFull = extraValue;
+        }
+        const shareData = {
+            title: songTitle, artist: songArtist, instrument, artUrl,
+            accuracy, score, hits, misses, bestStreak, maxMultiplier, fullCombo,
+            sections: shareSections, extraLabel, extraValue,
+        };
+        const metaSub = [songArtist, instrument].filter(Boolean).join(' · ');
+        const songMetaHtml = (songTitle || metaSub)
+            ? `<div class="nd-sum-songmeta">
+                <div class="nd-sum-song-text">${
+                    songTitle ? `<div class="nd-sum-song-title">${_ndEscapeHtml(songTitle)}</div>` : ''
+                }${
+                    metaSub ? `<div class="nd-sum-song-sub">${_ndEscapeHtml(metaSub)}</div>` : ''
+                }</div>${
+                    artUrl ? `<img class="nd-sum-art" alt="" src="${artUrl}">` : ''
+                }</div>`
+            : '';
+
         let sectionHtml = '';
         if (sectionStats.length > 0) {
             sectionHtml = '<div class="nd-sum-sections"><div class="nd-sum-subhead">Per Section</div>';
             for (const sec of sectionStats) {
                 const secTotal = sec.hits + sec.misses;
                 const secAcc = secTotal > 0 ? Math.round((sec.hits / secTotal) * 100) : 0;
-                const cls = secAcc >= 90 ? 'nd-bar-good' : secAcc >= 70 ? 'nd-bar-mid' : 'nd-bar-bad';
+                // Green only at 90%+; everything below is amber ("to improve").
+                // Never a failure red.
+                const cls = secAcc >= 90 ? 'nd-bar-good' : 'nd-bar-mid';
+                // Per-section practice button: loops that section's time range
+                // on replay. Only when we can re-launch the song AND we know the
+                // section's bounds.
+                const range = canRetry ? _sectionRange(sec.name) : null;
+                const practiceBtn = range
+                    ? `<button type="button" class="nd-sum-practice" data-start="${range.start}" data-end="${range.end}" title="Loop this section to practice it">Practice</button>`
+                    : '';
                 sectionHtml += `
                     <div class="nd-sum-bar-row">
                         <span class="nd-sum-bar-label">${_ndEscapeHtml(sec.name)}</span>
                         <div class="nd-sum-bar-track"><div class="nd-sum-bar-fill ${cls}" style="--nd-bar-w:${secAcc}%"></div></div>
                         <span class="nd-sum-bar-val">${secAcc}%</span>
+                        ${practiceBtn}
                     </div>
                 `;
             }
             sectionHtml += '</div>';
+        }
+
+        // "Focus next" — name the weakest section as a next step, not a failure
+        // (the growth-oriented replacement for a punishing letter grade). Only
+        // when a section sits meaningfully below a clean pass.
+        let focusHtml = '';
+        if (sectionStats.length > 0) {
+            let weakest = null;
+            for (const sec of sectionStats) {
+                const t = sec.hits + sec.misses;
+                if (t <= 0) continue;
+                const acc = Math.round((sec.hits / t) * 100);
+                if (!weakest || acc < weakest.acc) weakest = { name: sec.name, acc };
+            }
+            if (weakest && weakest.acc < 90) {
+                focusHtml = `<div class="nd-sum-focus"><span class="nd-sum-focus-label">Focus next</span>${_ndEscapeHtml(weakest.name)} · ${weakest.acc}%</div>`;
+            }
         }
 
         // Miss-category breakdown (#254 follow-up) — bars sum to total misses
@@ -14624,7 +15084,7 @@ function createNoteDetector(options = {}) {
             && returnSnap.previousFilename);
 
         const overlay = document.createElement('div');
-        overlay.className = 'nd-summary-overlay';
+        overlay.className = 'nd-summary-overlay' + (_ndResultsGlowOn() ? ' nd-glow' : '');
         // Skin attribute mirrors the instance root's so the overlay (a
         // separate top-level nd root in the CSS) themes identically.
         try { overlay.setAttribute('data-nd-skin', _ndLoadSkin()); } catch (e) {}
@@ -14648,37 +15108,46 @@ function createNoteDetector(options = {}) {
         overlay.innerHTML = `
             <div class="nd-sum-shell">
             <div class="nd-sum-panel">
+                <canvas class="nd-sum-confetti"></canvas>
                 <div class="nd-sum-header">Song Complete</div>
-                <div class="nd-sum-grade-wrap">
-                    <canvas class="nd-sum-confetti"></canvas>
-                    <div class="nd-sum-grade" data-grade="${grade}">${grade}</div>
-                    ${fullCombo ? '<div class="nd-sum-fc">Full Combo</div>' : ''}
-                </div>
+                ${songMetaHtml}
+                ${fullCombo ? '<div class="nd-sum-fc">★ Full Combo</div>' : ''}
                 <div class="nd-sum-headline">
                     <div class="nd-sum-acc"><span class="nd-sum-acc-n">0</span>%<div class="nd-sum-label">Accuracy</div></div>
                     <div class="nd-sum-score"><span class="nd-sum-score-n">0</span><div class="nd-sum-label">Score</div></div>
                 </div>
                 <div class="nd-sum-stats">
-                    <div class="nd-sum-stat" style="--row-i:0"><span class="nd-sum-stat-label">Hits</span><span class="nd-sum-stat-val nd-val-good">${hits}</span></div>
-                    <div class="nd-sum-stat" style="--row-i:1"><span class="nd-sum-stat-label">Misses</span><span class="nd-sum-stat-val nd-val-bad">${misses}</span></div>
+                    <div class="nd-sum-stat" style="--row-i:0"><span class="nd-sum-stat-label">Hits</span><span class="nd-sum-stat-val nd-val-good">${hits}/${total}</span></div>
+                    <div class="nd-sum-stat" style="--row-i:1"><span class="nd-sum-stat-label">${_ndEscapeHtml(extraLabel)}</span><span class="nd-sum-stat-val nd-val-accent">${_ndEscapeHtml(extraValueFull)}</span></div>
                     <div class="nd-sum-stat" style="--row-i:2"><span class="nd-sum-stat-label">Best Streak</span><span class="nd-sum-stat-val nd-val-accent">${bestStreak}</span></div>
                     <div class="nd-sum-stat" style="--row-i:3"><span class="nd-sum-stat-label">Max Multiplier</span><span class="nd-sum-stat-val nd-val-accent">×${maxMultiplier}</span></div>
                 </div>
                 <div class="nd-sum-xp hidden"></div>
                 ${breakdownHtml}
+                ${focusHtml}
                 ${sectionHtml}
                 ${diagnosticPlayHtml}
+                <div class="nd-sum-share">
+                    <button type="button" class="nd-summary-copy nd-btn"
+                            title="Copy a shareable score card to the clipboard">Copy card</button>
+                    <button type="button" class="nd-summary-save nd-btn"
+                            title="Save the score card as a PNG">⤓ Save</button>
+                </div>
                 <div class="nd-sum-actions">
                     ${showReturnPrevBtn ? `
                     <button type="button" class="nd-summary-return-prev nd-btn">
                         Return to Previous Song
                     </button>` : ''}
                     ${tuningMode ? `
-                    <button class="nd-summary-download nd-btn nd-btn-primary">
+                    <button class="nd-summary-download nd-btn">
                         Download Diagnostic JSON
                     </button>` : ''}
-                    <button class="nd-summary-close nd-btn">
-                        Close
+                    ${canRetry ? `
+                    <button type="button" class="nd-summary-retry nd-btn nd-btn-primary">
+                        Retry Song
+                    </button>` : ''}
+                    <button type="button" class="nd-summary-close nd-btn${canRetry ? '' : ' nd-btn-primary'}">
+                        Exit Song
                     </button>
                 </div>
             </div>
@@ -14687,6 +15156,85 @@ function createNoteDetector(options = {}) {
         `;
         const closeBtn = overlay.querySelector('.nd-summary-close');
         if (closeBtn) closeBtn.onclick = () => _ndDismissSummary(true);
+        // Album-art thumbnail: drop it (and collapse the gap) if the song has
+        // no art — the endpoint 404s and we don't want a broken-image glyph.
+        const artImgEl = overlay.querySelector('.nd-sum-art');
+        if (artImgEl) artImgEl.onerror = () => { try { artImgEl.remove(); } catch (e) {} };
+        // Copy card / Save — render the share image in the active skin.
+        const copyBtn = overlay.querySelector('.nd-summary-copy');
+        if (copyBtn) copyBtn.onclick = () => _ndShareCardClick(copyBtn, 'copy', shareData, overlay);
+        const saveBtn = overlay.querySelector('.nd-summary-save');
+        if (saveBtn) saveBtn.onclick = () => _ndShareCardClick(saveBtn, 'download', shareData, overlay);
+        // Retry Song — replay the same song + same arrangement (instrument).
+        // Mirrors the Return-to-Previous-Song handler: we navigate ourselves,
+        // so drop the auto-exit hold up front and only fall back to releasing
+        // it (→ menu) if playSong rejects, leaving the user stranded.
+        const retryBtn = overlay.querySelector('.nd-summary-retry');
+        if (retryBtn) {
+            retryBtn.onclick = () => {
+                if (!canRetry) { _ndDismissSummary(true); return; }
+                const release = _ndAutoExitRelease;
+                _ndAutoExitRelease = null;
+                overlay.remove();
+                const _fallback = () => { if (release) { try { release(); } catch (e) {} } };
+                try {
+                    const p = window.playSong(
+                        encodeURIComponent(retryFilename),
+                        arrangementIndex,
+                        { bridge: false },
+                    );
+                    if (p && typeof p.then === 'function') {
+                        p.catch((e) => {
+                            console.warn('[note_detect] retry song failed:',
+                                e && e.message ? e.message : e);
+                            _fallback();
+                        });
+                    }
+                } catch (e) {
+                    console.warn('[note_detect] retry song failed:',
+                        e && e.message ? e.message : e);
+                    _fallback();
+                }
+            };
+        }
+        // Per-section "Practice This Section" — replay the song with a loop
+        // armed over that section's time range. Uses the host's load-and-loop
+        // handoff (window._pendingHighwayLoop), the same mechanism the editor's
+        // "Loop in 3D" uses: stash the loop, call playSong, and the host arms
+        // the loop + starts playback once the chart is ready.
+        (overlay.querySelectorAll('.nd-sum-practice') || []).forEach((pBtn) => {
+            pBtn.onclick = () => {
+                if (!canRetry) { _ndDismissSummary(true); return; }
+                const a = Number(pBtn.dataset.start), b = Number(pBtn.dataset.end);
+                const release = _ndAutoExitRelease;
+                _ndAutoExitRelease = null;
+                overlay.remove();
+                const _fallback = () => { if (release) { try { release(); } catch (e) {} } };
+                try {
+                    if (Number.isFinite(a) && Number.isFinite(b) && b > a) {
+                        // returnCtx:null → host applies the loop to the next song
+                        // that becomes ready (the one we're about to load).
+                        window._pendingHighwayLoop = { a, b, returnCtx: null };
+                    }
+                    const p = window.playSong(
+                        encodeURIComponent(retryFilename), arrangementIndex, { bridge: false },
+                    );
+                    if (p && typeof p.then === 'function') {
+                        p.catch((e) => {
+                            console.warn('[note_detect] practice section failed:',
+                                e && e.message ? e.message : e);
+                            try { window._pendingHighwayLoop = null; } catch (_) {}
+                            _fallback();
+                        });
+                    }
+                } catch (e) {
+                    console.warn('[note_detect] practice section failed:',
+                        e && e.message ? e.message : e);
+                    try { window._pendingHighwayLoop = null; } catch (_) {}
+                    _fallback();
+                }
+            };
+        });
         const returnPrevBtn = overlay.querySelector('.nd-summary-return-prev');
         if (returnPrevBtn) {
             returnPrevBtn.onclick = () => {
@@ -14715,7 +15263,7 @@ function createNoteDetector(options = {}) {
         // (startHidden) summary is revealed after a new song's playSong hook
         // may have reset the live counters, so _runDeferredSummary() must
         // not re-read them.
-        overlay._ndReveal = { accuracy, score, grade };
+        overlay._ndReveal = { accuracy, score, fullCombo };
         // startHidden: built now (so the stats are this song's) but kept
         // out of view until _runDeferredSummary() reveals it — used when
         // a training consent modal is taking the screen on song:ended.
@@ -14781,7 +15329,9 @@ function createNoteDetector(options = {}) {
                 requestAnimationFrame(tick);
             } else {
                 setFinal();
-                if (vals.grade === 'S' || vals.grade === 'A') _runConfetti(overlay);
+                // Celebrate genuine wins (a clean run, or a strong pass) — reward
+                // the work, never tied to a pass/fail grade.
+                if (vals.fullCombo || vals.accuracy >= 90) _runConfetti(overlay);
             }
         };
         requestAnimationFrame(tick);
@@ -15026,6 +15576,21 @@ function createNoteDetector(options = {}) {
         getVerifierOffset,
         injectButton,
         showSummary,
+        // ── Public results-card API (consumed by other plugins, e.g. Virtuoso)
+        // Render / copy / save the shareable results card from a caller-supplied
+        // data object so any plugin reuses ONE canonical card implementation
+        // instead of duplicating it. `data` fields (all optional): eyebrow,
+        // hero (or title), artist, instrument, artUrl, accuracy, score, hits,
+        // misses, bestStreak, maxMultiplier, fullCombo, sections [{name,acc}],
+        // extraLabel/extraValue, stats [{label,value,color}] (overrides the
+        // default stat strip), brand (footer). `opts.overlayEl` supplies the
+        // skin palette (defaults to note_detect's neon when omitted).
+        renderResultsCard: (data, opts) =>
+            _ndRenderShareCard(data || {}, (opts && opts.overlayEl) || null),
+        copyResultsCard: (data, opts) =>
+            _ndShareCardAction(data || {}, 'copy', (opts && opts.overlayEl) || null),
+        saveResultsCard: (data, opts) =>
+            _ndSaveCard(data || {}, (opts && opts.overlayEl) || null),
         // Diagnostic export (#254 follow-up). `downloadDiagnostic()`
         // triggers a browser file save of the current session's
         // breakdown + capped event log; `getDiagnostic()` returns the

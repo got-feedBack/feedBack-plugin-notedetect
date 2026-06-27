@@ -66,6 +66,31 @@
         </select>
     </div>
 
+    <!-- Results card & sharing. The text-glow A/B (off by default for
+         legibility; on for design review) themes the Song Complete popup AND
+         the shared card image. The save folder is where the card's "Save"
+         button writes the PNG (blank → the user's Pictures folder). Both are
+         standalone localStorage keys so screen.js reads them directly. -->
+    <div class="bg-dark-700/40 border border-gray-800 rounded-xl p-4 mb-4">
+        <h4 class="text-sm font-semibold text-gray-300 mb-2">Results card &amp; sharing</h4>
+        <label class="flex items-start gap-3 cursor-pointer select-none mb-4">
+            <input type="checkbox" id="nd-results-glow"
+                   class="mt-0.5 rounded border-gray-600 bg-dark-700 text-accent focus:ring-accent/40">
+            <span class="text-sm text-gray-300">
+                Text glow on the results card
+                <span class="block text-[11px] text-gray-500 leading-relaxed mt-1">
+                    Off by default for legibility. On adds a neon glow to the big numbers on the Song Complete popup and the shared card image — kept as an A/B option for design review.
+                </span>
+            </span>
+        </label>
+        <label for="nd-save-dir" class="block text-xs text-gray-300 mb-1">Save folder for shared cards</label>
+        <input type="text" id="nd-save-dir" placeholder="(default: your Pictures folder)"
+               class="w-full bg-dark-700 border border-gray-600 rounded-lg px-3 py-2 text-sm text-gray-200 focus:ring-accent/40 focus:border-accent">
+        <p class="text-[11px] text-gray-500 leading-relaxed mt-1">
+            Where the <strong>Save</strong> button on the results card writes the PNG. Leave blank to use your Pictures folder (e.g. <code>C:\Users\you\Pictures</code>). Must be an absolute path.
+        </p>
+    </div>
+
     <!-- Auto-record toggle. A normal user setting (not advanced): every
          play is captured to static/note_detect_recordings/ for later
          analysis. Off by default; opt in here. Persisted via the plugin's
@@ -926,6 +951,30 @@
         skinSel.onchange = () => {
             const nd = window.noteDetect;
             if (nd && typeof nd.setSkin === 'function') nd.setSkin(skinSel.value);
+        };
+    }
+
+    // Results text glow (A/B) — standalone key the card reads directly on
+    // its next render. No live root to update; applies on the next results card.
+    const glowCb = _q('nd-results-glow');
+    if (glowCb) {
+        try { glowCb.checked = localStorage.getItem('slopsmith_notedetect_results_glow') === '1'; } catch (_) {}
+        glowCb.onchange = () => {
+            try { localStorage.setItem('slopsmith_notedetect_results_glow', glowCb.checked ? '1' : '0'); } catch (_) {}
+        };
+    }
+
+    // Save folder for shared cards — blank means "use the server default"
+    // (the user's Pictures folder), keeping the resolution server-side.
+    const saveDirInput = _q('nd-save-dir');
+    if (saveDirInput) {
+        try { saveDirInput.value = localStorage.getItem('slopsmith_notedetect_save_dir') || ''; } catch (_) {}
+        saveDirInput.onchange = () => {
+            try {
+                const v = saveDirInput.value.trim();
+                if (v) localStorage.setItem('slopsmith_notedetect_save_dir', v);
+                else localStorage.removeItem('slopsmith_notedetect_save_dir');
+            } catch (_) {}
         };
     }
 
