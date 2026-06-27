@@ -49,7 +49,8 @@
 /* ── Skin variables — defaults are the "neon" arcade skin ─────────────── */
 
 .nd-instance-root,
-.nd-summary-overlay {
+.nd-summary-overlay,
+.nd-toast {
     --nd-accent: #00f0ff;          /* primary accent (score, frames)        */
     --nd-accent2: #ff2ec4;         /* secondary accent (top multiplier)     */
     --nd-hit: #00ff88;             /* good / hits                           */
@@ -487,8 +488,14 @@ body:has(#v3-upnext) .nd-hud {
 }
 .nd-sum-score {
     color: var(--nd-accent);
-    /* No text glow on the big readout — the outer glow bled into the digits
-       and hurt legibility (community feedback). Glow stays on borders/accents. */
+    /* No text glow on the big readout by default — the outer glow bled into
+       the digits and hurt legibility (community feedback). The glow is an
+       opt-in A/B (.nd-glow below) for design review. */
+}
+/* "Results text glow" A/B setting — re-enables the glow on the big readouts. */
+.nd-glow .nd-sum-score,
+.nd-glow .nd-sum-acc {
+    text-shadow: var(--nd-glow-accent);
 }
 .nd-sum-label {
     margin-top: 0.1rem;
@@ -732,4 +739,36 @@ body:has(#v3-upnext) .nd-hud {
     .nd-sum-frame::after {
         animation: none;
     }
+}
+
+/* ── Save confirmation toast ─────────────────────────────────────────────
+   Skin-themed, bottom-center, ~6 s. data-nd-skin on the element resolves the
+   palette (esports/metal override; neon via the base rule above). */
+.nd-toast {
+    position: fixed;
+    left: 50%;
+    bottom: 2.2rem;
+    transform: translate(-50%, 1.2rem);
+    z-index: 2147483000;
+    max-width: 80vw;
+    padding: 0.7rem 1.1rem;
+    font-family: var(--nd-font-display, ui-sans-serif, system-ui, sans-serif);
+    font-size: 0.82rem;
+    letter-spacing: 0.02em;
+    color: var(--nd-text, #e8f6ff);
+    background-color: var(--nd-bg, rgba(6, 10, 24, 0.92));
+    background-image: var(--nd-texture, none);
+    border: 1px solid var(--nd-frame, rgba(0, 240, 255, 0.45));
+    border-radius: calc(var(--nd-radius, 10px) * 0.7 + 2px);
+    box-shadow: var(--nd-bevel, 0 6px 24px rgba(0, 0, 0, 0.5));
+    opacity: 0;
+    transition: opacity 0.25s ease, transform 0.25s ease;
+    pointer-events: none;
+}
+.nd-toast.nd-toast-in {
+    opacity: 1;
+    transform: translate(-50%, 0);
+}
+@media (prefers-reduced-motion: reduce) {
+    .nd-toast { transition: opacity 0.25s ease; transform: translate(-50%, 0); }
 }

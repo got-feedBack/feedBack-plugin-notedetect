@@ -291,7 +291,7 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // exact build that produced it. The script tag has no `import`/`fetch`
 // hook to read package.json at load time, so this is the single
 // hand-maintained constant the diagnostic path keys off of.
-const _ND_VERSION = '1.16.0';
+const _ND_VERSION = '1.17.0';
 
 // Audio processing constants
 const _ND_MIN_YIN_SAMPLES = 4096;  // enough for low E at 48kHz (need tau=585, halfLen=2048)
@@ -671,6 +671,39 @@ function _ndSongArtUrl(filename) {
     return '/api/song/' + String(filename).split('/').map(encodeURIComponent).join('/') + '/art';
 }
 
+// Results "text glow" A/B setting (standalone key so the card reads it
+// directly). Off by default — the glow bled into the digits (readability).
+function _ndResultsGlowOn() {
+    try { return localStorage.getItem('slopsmith_notedetect_results_glow') === '1'; }
+    catch (e) { return false; }
+}
+
+// User-configured folder the Save button writes to ('' → server default =
+// the user's Pictures folder).
+function _ndSaveDir() {
+    try { return (localStorage.getItem('slopsmith_notedetect_save_dir') || '').trim(); }
+    catch (e) { return ''; }
+}
+
+// Transient skin-themed toast (used for "Saved to …"). Self-removing.
+function _ndToast(message, ms) {
+    if (typeof document === 'undefined' || !document.body) return;
+    try {
+        const t = document.createElement('div');
+        t.className = 'nd-toast';
+        try { t.setAttribute('data-nd-skin', _ndLoadSkin()); } catch (e) {}
+        t.textContent = String(message == null ? '' : message);
+        document.body.appendChild(t);
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(() => { try { t.classList.add('nd-toast-in'); } catch (e) {} });
+        } else { t.classList.add('nd-toast-in'); }
+        setTimeout(() => {
+            try { t.classList.remove('nd-toast-in'); } catch (e) {}
+            setTimeout(() => { try { t.remove(); } catch (e) {} }, 400);
+        }, ms || 6000);
+    } catch (e) {}
+}
+
 // Clipboard text fallback (when image copy + download both fail).
 function _ndShareCardText(data) {
     const d = data || {};
@@ -759,65 +792,95 @@ async function _ndRenderShareCard(data, overlayEl) {
     ctx.strokeRect(28.5, 28.5, W - 57, H - 57);                       // hairline frame
     ctx.textBaseline = 'alphabetic';
 
-    const heroMaxW = W - P * 2 - 240;   // leave room for the grade stamp at right
+    // Optional text glow (A/B setting) — off by default for legibility.
+    const glow = _ndResultsGlowOn();
+    const glowSet = (color) => { if (glow) { ctx.shadowColor = color; ctx.shadowBlur = 16; } };
+    const glowClear = () => { ctx.shadowBlur = 0; ctx.shadowColor = 'transparent'; };
 
-    // Eyebrow
-    spaced(6); ctx.fillStyle = dim; font(20, fDisp, 700);
-    ctx.fillText('SONG COMPLETE', P, 96); spaced(0);
-    // Hero song title
-    let heroSize = 74; font(heroSize, fDisp, 800);
-    const heroText = d.title || 'Song Complete';
-    if (ctx.measureText(heroText).width > heroMaxW) { heroSize = 54; font(heroSize, fDisp, 800); }
-    ctx.fillStyle = text; ctx.fillText(fit(heroText, heroMaxW), P, 184);
-    // Sub: artist · instrument
-    const sub = [d.artist, d.instrument].filter(Boolean).join('   ·   ');
-    if (sub) { spaced(2); ctx.fillStyle = dim; font(26, fDisp, 500); ctx.fillText(fit(sub.toUpperCase(), heroMaxW), P, 226); spaced(0); }
-
-    // Full-combo badge (top-right) — a real competency, no letter grade.
-    if (d.fullCombo) {
-        spaced(4); ctx.fillStyle = hit; font(22, fDisp, 700);
-        const fcW = ctx.measureText('★ FULL COMBO').width + 4 * 11;
-        ctx.fillText('★ FULL COMBO', W - P - fcW, 150); spaced(0);
-    }
-
-    // Album art — the hero, centered in the gap above the stat strip.
+    // Album art (top-right) — same-origin, cover-fit, accent-framed.
+    const A = 190, artX = W - P - A, artY = 64, artR = 14;
     if (artImg) {
-        const A = 184, ax = (W - A) / 2, ay = 260, r = 14;
         ctx.save();
         ctx.beginPath();
-        if (ctx.roundRect) ctx.roundRect(ax, ay, A, A, r); else ctx.rect(ax, ay, A, A);
+        if (ctx.roundRect) ctx.roundRect(artX, artY, A, A, artR); else ctx.rect(artX, artY, A, A);
         ctx.closePath(); ctx.clip();
-        // cover-fit (fill the square, crop the overflow)
         const iw = artImg.naturalWidth, ih = artImg.naturalHeight;
         const s = Math.max(A / iw, A / ih), dw = iw * s, dh = ih * s;
-        ctx.drawImage(artImg, ax + (A - dw) / 2, ay + (A - dh) / 2, dw, dh);
+        ctx.drawImage(artImg, artX + (A - dw) / 2, artY + (A - dh) / 2, dw, dh);
         ctx.restore();
         ctx.strokeStyle = accent; ctx.lineWidth = 2;
         ctx.beginPath();
-        if (ctx.roundRect) ctx.roundRect(ax + 1, ay + 1, A - 2, A - 2, r); else ctx.rect(ax + 1, ay + 1, A - 2, A - 2);
+        if (ctx.roundRect) ctx.roundRect(artX + 1, artY + 1, A - 2, A - 2, artR); else ctx.rect(artX + 1, artY + 1, A - 2, A - 2);
         ctx.stroke();
     }
+    const leftMaxW = (artImg ? artX - 28 : W - P) - P;
 
-    // Stat strip across the bottom.
+    // Eyebrow + hero title + sub (top-left).
+    spaced(6); ctx.fillStyle = dim; font(20, fDisp, 700);
+    ctx.fillText('SONG COMPLETE', P, 92); spaced(0);
+    let heroSize = 64; font(heroSize, fDisp, 800);
+    const heroText = d.title || 'Song Complete';
+    if (ctx.measureText(heroText).width > leftMaxW) { heroSize = 48; font(heroSize, fDisp, 800); }
+    glowSet(text); ctx.fillStyle = text; ctx.fillText(fit(heroText, leftMaxW), P, 156); glowClear();
+    const sub = [d.artist, d.instrument].filter(Boolean).join('   ·   ');
+    if (sub) { spaced(2); ctx.fillStyle = dim; font(24, fDisp, 500); ctx.fillText(fit(sub.toUpperCase(), leftMaxW), P, 196); spaced(0); }
+
+    // Full-combo badge — right-aligned under the art (top-right with no art).
+    if (d.fullCombo) {
+        spaced(4); glowSet(hit); ctx.fillStyle = hit; font(22, fDisp, 700);
+        const fcW = ctx.measureText('★ FULL COMBO').width + 4 * 11;
+        ctx.fillText('★ FULL COMBO', W - P - fcW, artImg ? artY + A + 36 : 150);
+        glowClear(); spaced(0);
+    }
+
+    // Per-section accuracy bars (left column) — "revisit", never "failed".
+    const secs = Array.isArray(d.sections) ? d.sections.slice(0, 5) : [];
+    if (secs.length) {
+        spaced(3); ctx.fillStyle = dim; font(15, fDisp, 600);
+        ctx.fillText('SECTIONS', P, 250); spaced(0);
+        const barX = P + 170, barW = 300, rowH = 34;
+        let y = 284;
+        for (const sec of secs) {
+            const acc = Math.max(0, Math.min(100, Math.round(sec.acc)));
+            const barColor = acc >= 90 ? hit : acc >= 70 ? accent : miss;
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = text; font(18, fDisp, 600);
+            ctx.fillText(fit(sec.name, 150), P, y);
+            ctx.fillStyle = 'rgba(255,255,255,0.10)';
+            if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(barX, y - 6, barW, 12, 6); ctx.fill(); }
+            else ctx.fillRect(barX, y - 6, barW, 12);
+            ctx.fillStyle = barColor;
+            const fw = Math.max(6, barW * acc / 100);
+            if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(barX, y - 6, fw, 12, 6); ctx.fill(); }
+            else ctx.fillRect(barX, y - 6, fw, 12);
+            ctx.fillStyle = text; font(17, fDisp, 700);
+            ctx.fillText(acc + '%', barX + barW + 14, y);
+            y += rowH;
+        }
+        ctx.textBaseline = 'alphabetic';
+    }
+
+    // Stat strip across the bottom — note counts as fractions of judged total.
+    const total = (d.hits || 0) + (d.misses || 0);
     const stats = [
-        { label: 'ACCURACY',    value: d.accuracy + '%',      color: text },
-        { label: 'SCORE',       value: String(d.score),       color: accent },
-        { label: 'HITS',        value: String(d.hits),        color: hit },
-        { label: 'MISSES',      value: String(d.misses),      color: miss },
-        { label: 'BEST STREAK', value: String(d.bestStreak),  color: text },
-        { label: 'MAX MULT',    value: '×' + d.maxMultiplier, color: accent2 },
+        { label: 'ACCURACY',    value: d.accuracy + '%',          color: text },
+        { label: 'SCORE',       value: String(d.score),           color: accent },
+        { label: 'HITS',        value: d.hits + '/' + total,      color: hit },
+        { label: 'MISSES',      value: d.misses + '/' + total,    color: miss },
+        { label: 'BEST STREAK', value: String(d.bestStreak),      color: text },
+        { label: 'MAX MULT',    value: '×' + d.maxMultiplier,     color: accent2 },
     ];
     const colW = (W - P * 2) / stats.length;
-    const sy = 478;
+    const sy = 520;
     stats.forEach((st, i) => {
         const x = P + colW * i;
-        spaced(2); ctx.fillStyle = dim; font(16, fDisp, 600); ctx.fillText(st.label, x, sy); spaced(0);
-        ctx.fillStyle = st.color; font(46, fDisp, 700); ctx.fillText(st.value, x, sy + 54);
+        spaced(2); ctx.fillStyle = dim; font(15, fDisp, 600); ctx.fillText(st.label, x, sy); spaced(0);
+        glowSet(st.color); ctx.fillStyle = st.color; font(36, fDisp, 700); ctx.fillText(st.value, x, sy + 46); glowClear();
     });
 
     // Footer brand.
-    spaced(2); ctx.fillStyle = dim; font(18, fDisp, 500);
-    ctx.fillText('FEE[dB]ACK · NOTE DETECTION', P, H - 44); spaced(0);
+    spaced(2); ctx.fillStyle = dim; font(16, fDisp, 500);
+    ctx.fillText('FEE[dB]ACK · NOTE DETECTION', P, H - 26); spaced(0);
     return cv;
 }
 
@@ -859,14 +922,64 @@ async function _ndShareCardAction(data, action, overlayEl) {
     return 'failed';
 }
 
-// Click handler for a Copy card / Save button — runs the action and gives
-// transient in-button feedback. Re-enables/restores the label after.
+// Save the rendered card to disk. Preferred path: POST the PNG to the plugin
+// backend, which writes it to the user's configured folder (default: their
+// Pictures folder) and returns the absolute path. Falls back to a normal
+// browser download if the backend route isn't reachable. Returns
+// { ok, path?, dir?, filename?, fallback? }.
+async function _ndSaveCard(data, overlayEl) {
+    const cv = await _ndRenderShareCard(data, overlayEl);
+    if (!cv || !cv.toBlob) return { ok: false };
+    const blob = await new Promise((r) => cv.toBlob(r, 'image/png'));
+    if (!blob) return { ok: false };
+    const name = _ndShareCardFilename(data);
+    const dir = _ndSaveDir();
+    try {
+        const qs = '?name=' + encodeURIComponent(name) + (dir ? '&dir=' + encodeURIComponent(dir) : '');
+        const resp = await fetch('/api/plugins/note_detect/save-card' + qs, {
+            method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob,
+        });
+        if (resp && resp.ok) {
+            const j = await resp.json().catch(() => null);
+            if (j && j.ok) return { ok: true, path: j.path, dir: j.dir, filename: j.filename };
+        }
+    } catch (e) { /* fall through to browser download */ }
+    // Fallback: browser download (server route unavailable).
+    try {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = name;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => { try { URL.revokeObjectURL(url); } catch (e) {} }, 4000);
+        return { ok: true, fallback: true, filename: name };
+    } catch (e) {}
+    return { ok: false };
+}
+
+// Click handler for Copy card / Save — gives transient in-button feedback,
+// plus a 6 s "Saved to …" toast on the Save path.
 async function _ndShareCardClick(btn, action, data, overlayEl) {
     if (!btn) return;
     const orig = btn.textContent;
     btn.disabled = true;
+    if (action === 'download') {
+        btn.textContent = 'Saving…';
+        let res = { ok: false };
+        try { res = await _ndSaveCard(data, overlayEl); } catch (e) {}
+        if (res.ok && !res.fallback) {
+            btn.textContent = 'Saved ✓';
+            _ndToast('Saved to ' + (res.dir || res.path || 'disk'), 6000);
+        } else if (res.ok && res.fallback) {
+            btn.textContent = 'Saved ✓';
+            _ndToast('Saved ' + (res.filename || 'card') + ' to your browser downloads', 6000);
+        } else {
+            btn.textContent = 'Couldn’t save';
+        }
+        setTimeout(() => { if (btn.isConnected) { btn.textContent = orig; btn.disabled = false; } }, 1600);
+        return;
+    }
     let res = 'failed';
-    try { res = await _ndShareCardAction(data, action, overlayEl); } catch (e) {}
+    try { res = await _ndShareCardAction(data, 'copy', overlayEl); } catch (e) {}
     btn.textContent = res === 'copied' ? 'Copied ✓'
         : res === 'saved' ? 'Saved ✓'
         : res === 'copied-text' ? 'Copied text ✓'
@@ -14784,9 +14897,14 @@ function createNoteDetector(options = {}) {
         const retryFilename = _ndShared.currentFilename || '';
         const canRetry = !!retryFilename && typeof window.playSong === 'function';
         const artUrl = _ndSongArtUrl(retryFilename);
+        const shareSections = sectionStats.map((s) => {
+            const t = s.hits + s.misses;
+            return { name: s.name, acc: t > 0 ? Math.round((s.hits / t) * 100) : 0 };
+        });
         const shareData = {
             title: songTitle, artist: songArtist, instrument, artUrl,
             accuracy, score, hits, misses, bestStreak, maxMultiplier, fullCombo,
+            sections: shareSections,
         };
         const metaSub = [songArtist, instrument].filter(Boolean).join(' · ');
         const songMetaHtml = (songTitle || metaSub)
@@ -14900,7 +15018,7 @@ function createNoteDetector(options = {}) {
             && returnSnap.previousFilename);
 
         const overlay = document.createElement('div');
-        overlay.className = 'nd-summary-overlay';
+        overlay.className = 'nd-summary-overlay' + (_ndResultsGlowOn() ? ' nd-glow' : '');
         // Skin attribute mirrors the instance root's so the overlay (a
         // separate top-level nd root in the CSS) themes identically.
         try { overlay.setAttribute('data-nd-skin', _ndLoadSkin()); } catch (e) {}
@@ -14933,8 +15051,8 @@ function createNoteDetector(options = {}) {
                     <div class="nd-sum-score"><span class="nd-sum-score-n">0</span><div class="nd-sum-label">Score</div></div>
                 </div>
                 <div class="nd-sum-stats">
-                    <div class="nd-sum-stat" style="--row-i:0"><span class="nd-sum-stat-label">Hits</span><span class="nd-sum-stat-val nd-val-good">${hits}</span></div>
-                    <div class="nd-sum-stat" style="--row-i:1"><span class="nd-sum-stat-label">Misses</span><span class="nd-sum-stat-val nd-val-bad">${misses}</span></div>
+                    <div class="nd-sum-stat" style="--row-i:0"><span class="nd-sum-stat-label">Hits</span><span class="nd-sum-stat-val nd-val-good">${hits}/${total}</span></div>
+                    <div class="nd-sum-stat" style="--row-i:1"><span class="nd-sum-stat-label">Misses</span><span class="nd-sum-stat-val nd-val-bad">${misses}/${total}</span></div>
                     <div class="nd-sum-stat" style="--row-i:2"><span class="nd-sum-stat-label">Best Streak</span><span class="nd-sum-stat-val nd-val-accent">${bestStreak}</span></div>
                     <div class="nd-sum-stat" style="--row-i:3"><span class="nd-sum-stat-label">Max Multiplier</span><span class="nd-sum-stat-val nd-val-accent">×${maxMultiplier}</span></div>
                 </div>
