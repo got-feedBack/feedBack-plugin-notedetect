@@ -199,16 +199,17 @@ test('_ndInstrumentLabel title-cases the arrangement and tolerates empties', () 
     assert.equal(core.instrumentLabel(undefined), '');
 });
 
-test('_ndShareCardText carries title, instrument, grade, accuracy, score', () => {
+test('_ndShareCardText carries title, instrument, accuracy, score (no grade)', () => {
     const core = loadDetectionCore();
     const txt = core.shareCardText({
-        title: 'Sample Song', instrument: 'Lead', grade: 'A',
+        title: 'Sample Song', instrument: 'Lead',
         accuracy: 92, score: 3700, fullCombo: false,
     });
     assert.match(txt, /fee\[dB\]ack — Sample Song \(Lead\)/);
-    assert.match(txt, /Grade A/);
     assert.match(txt, /92%/);
     assert.match(txt, /3700 pts/);
+    // The letter grade was removed from the card (charrette 2026-06-27).
+    assert.doesNotMatch(txt, /Grade/);
     assert.doesNotMatch(txt, /Full Combo/);
 });
 

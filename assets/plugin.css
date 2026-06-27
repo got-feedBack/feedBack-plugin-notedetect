@@ -381,6 +381,7 @@ body:has(#v3-upnext) .nd-hud {
 }
 
 .nd-sum-panel {
+    position: relative;            /* positioning context for the confetti overlay */
     width: 26rem;
     max-width: 92vw;
     max-height: 88vh;
@@ -420,12 +421,15 @@ body:has(#v3-upnext) .nd-hud {
     min-height: 7rem;
     margin-bottom: 0.3rem;
 }
+/* One-shot celebration burst — overlays the whole panel (it's a direct panel
+   child now that the letter grade is gone), purely decorative. */
 .nd-sum-confetti {
     position: absolute;
     inset: 0;
     width: 100%;
     height: 100%;
     pointer-events: none;
+    z-index: 3;
 }
 .nd-sum-grade {
     display: inline-block;
@@ -441,10 +445,13 @@ body:has(#v3-upnext) .nd-hud {
 .nd-sum-grade[data-grade="S"] { color: var(--nd-accent2); }
 .nd-sum-grade[data-grade="D"],
 .nd-sum-grade[data-grade="F"] { color: var(--nd-miss); }
+/* Full-combo badge — a real competency, now the celebratory hero in place of
+   the (removed) letter grade. Centered standalone under the song line. */
 .nd-sum-fc {
-    margin-top: 0.25rem;
-    font-size: 0.7rem;
-    letter-spacing: 0.3em;
+    margin: 0.15rem 0 0.5rem;
+    text-align: center;
+    font-size: 0.82rem;
+    letter-spacing: 0.28em;
     text-transform: uppercase;
     color: var(--nd-hit);
     text-shadow: var(--nd-glow-current);
@@ -480,7 +487,8 @@ body:has(#v3-upnext) .nd-hud {
 }
 .nd-sum-score {
     color: var(--nd-accent);
-    text-shadow: var(--nd-glow-accent);
+    /* No text glow on the big readout — the outer glow bled into the digits
+       and hurt legibility (community feedback). Glow stays on borders/accents. */
 }
 .nd-sum-label {
     margin-top: 0.1rem;
@@ -539,6 +547,22 @@ body:has(#v3-upnext) .nd-hud {
     letter-spacing: 0.06em;
     color: var(--nd-hit);
     text-shadow: var(--nd-glow-current);
+}
+
+/* "Focus next" — the one growth-oriented next-step line (replaces the grade's
+   verdict). Calm, not a failure callout. */
+.nd-sum-focus {
+    margin: 0.1rem 0 0.6rem;
+    text-align: center;
+    font-size: 0.8rem;
+    color: var(--nd-text);
+}
+.nd-sum-focus-label {
+    margin-right: 0.4rem;
+    font-size: 0.62rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--nd-accent);
 }
 
 /* Per-section / miss-breakdown bars. */

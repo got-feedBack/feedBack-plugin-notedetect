@@ -676,7 +676,7 @@ function _ndShareCardText(data) {
     const d = data || {};
     const what = d.title || 'My run';
     const inst = d.instrument ? ` (${d.instrument})` : '';
-    const tail = [`Grade ${d.grade}`, `${d.accuracy}%`, `${d.score} pts`];
+    const tail = [`${d.accuracy}%`, `${d.score} pts`];
     if (d.fullCombo) tail.push('Full Combo');
     return `fee[dB]ack — ${what}${inst}\n${tail.join(' · ')}`;
 }
@@ -739,9 +739,6 @@ async function _ndRenderShareCard(data, overlayEl) {
     const dim     = cssVar('--nd-dim',     '#7c93a8');
     const bg      = cssVar('--nd-bg',      'rgba(6,10,24,0.82)');
     const fDisp   = cssVar('--nd-font-display', "'Orbitron', sans-serif");
-    const fGrade  = cssVar('--nd-font-grade',   "'Orbitron', sans-serif");
-    const gradeColor = d.grade === 'S' ? accent2
-        : (d.grade === 'D' || d.grade === 'F') ? miss : accent;
 
     const W = 1200, H = 630, P = 72;
     const font = (px, stack, weight) => { ctx.font = `${weight || 700} ${px}px ${stack}`; };
@@ -776,19 +773,16 @@ async function _ndRenderShareCard(data, overlayEl) {
     const sub = [d.artist, d.instrument].filter(Boolean).join('   ·   ');
     if (sub) { spaced(2); ctx.fillStyle = dim; font(26, fDisp, 500); ctx.fillText(fit(sub.toUpperCase(), heroMaxW), P, 226); spaced(0); }
 
-    // Grade stamp (top-right), full-combo callout under it.
-    font(150, fGrade, 700); ctx.fillStyle = gradeColor;
-    const gW = ctx.measureText(d.grade).width;
-    ctx.fillText(d.grade, W - P - gW, 200);
+    // Full-combo badge (top-right) — a real competency, no letter grade.
     if (d.fullCombo) {
-        spaced(4); ctx.fillStyle = hit; font(20, fDisp, 700);
-        const fcW = ctx.measureText('FULL COMBO').width + 4 * 9;
-        ctx.fillText('FULL COMBO', W - P - fcW, 238); spaced(0);
+        spaced(4); ctx.fillStyle = hit; font(22, fDisp, 700);
+        const fcW = ctx.measureText('★ FULL COMBO').width + 4 * 11;
+        ctx.fillText('★ FULL COMBO', W - P - fcW, 150); spaced(0);
     }
 
-    // Album art centered in the gap between the title row and the stat strip.
+    // Album art — the hero, centered in the gap above the stat strip.
     if (artImg) {
-        const A = 168, ax = (W - A) / 2, ay = 266, r = 12;
+        const A = 184, ax = (W - A) / 2, ay = 260, r = 14;
         ctx.save();
         ctx.beginPath();
         if (ctx.roundRect) ctx.roundRect(ax, ay, A, A, r); else ctx.rect(ax, ay, A, A);
@@ -14792,7 +14786,7 @@ function createNoteDetector(options = {}) {
         const artUrl = _ndSongArtUrl(retryFilename);
         const shareData = {
             title: songTitle, artist: songArtist, instrument, artUrl,
-            grade, accuracy, score, hits, misses, bestStreak, maxMultiplier, fullCombo,
+            accuracy, score, hits, misses, bestStreak, maxMultiplier, fullCombo,
         };
         const metaSub = [songArtist, instrument].filter(Boolean).join(' · ');
         const songMetaHtml = (songTitle || metaSub)
@@ -14822,6 +14816,23 @@ function createNoteDetector(options = {}) {
                 `;
             }
             sectionHtml += '</div>';
+        }
+
+        // "Focus next" — name the weakest section as a next step, not a failure
+        // (the growth-oriented replacement for a punishing letter grade). Only
+        // when a section sits meaningfully below a clean pass.
+        let focusHtml = '';
+        if (sectionStats.length > 0) {
+            let weakest = null;
+            for (const sec of sectionStats) {
+                const t = sec.hits + sec.misses;
+                if (t <= 0) continue;
+                const acc = Math.round((sec.hits / t) * 100);
+                if (!weakest || acc < weakest.acc) weakest = { name: sec.name, acc };
+            }
+            if (weakest && weakest.acc < 90) {
+                focusHtml = `<div class="nd-sum-focus"><span class="nd-sum-focus-label">Focus next</span>${_ndEscapeHtml(weakest.name)} · ${weakest.acc}%</div>`;
+            }
         }
 
         // Miss-category breakdown (#254 follow-up) — bars sum to total misses
@@ -14913,13 +14924,10 @@ function createNoteDetector(options = {}) {
         overlay.innerHTML = `
             <div class="nd-sum-shell">
             <div class="nd-sum-panel">
+                <canvas class="nd-sum-confetti"></canvas>
                 <div class="nd-sum-header">Song Complete</div>
                 ${songMetaHtml}
-                <div class="nd-sum-grade-wrap">
-                    <canvas class="nd-sum-confetti"></canvas>
-                    <div class="nd-sum-grade" data-grade="${grade}">${grade}</div>
-                    ${fullCombo ? '<div class="nd-sum-fc">Full Combo</div>' : ''}
-                </div>
+                ${fullCombo ? '<div class="nd-sum-fc">★ Full Combo</div>' : ''}
                 <div class="nd-sum-headline">
                     <div class="nd-sum-acc"><span class="nd-sum-acc-n">0</span>%<div class="nd-sum-label">Accuracy</div></div>
                     <div class="nd-sum-score"><span class="nd-sum-score-n">0</span><div class="nd-sum-label">Score</div></div>
@@ -14932,6 +14940,7 @@ function createNoteDetector(options = {}) {
                 </div>
                 <div class="nd-sum-xp hidden"></div>
                 ${breakdownHtml}
+                ${focusHtml}
                 ${sectionHtml}
                 ${diagnosticPlayHtml}
                 <div class="nd-sum-share">
@@ -15032,7 +15041,7 @@ function createNoteDetector(options = {}) {
         // (startHidden) summary is revealed after a new song's playSong hook
         // may have reset the live counters, so _runDeferredSummary() must
         // not re-read them.
-        overlay._ndReveal = { accuracy, score, grade };
+        overlay._ndReveal = { accuracy, score, fullCombo };
         // startHidden: built now (so the stats are this song's) but kept
         // out of view until _runDeferredSummary() reveals it — used when
         // a training consent modal is taking the screen on song:ended.
@@ -15098,7 +15107,9 @@ function createNoteDetector(options = {}) {
                 requestAnimationFrame(tick);
             } else {
                 setFinal();
-                if (vals.grade === 'S' || vals.grade === 'A') _runConfetti(overlay);
+                // Celebrate genuine wins (a clean run, or a strong pass) — reward
+                // the work, never tied to a pass/fail grade.
+                if (vals.fullCombo || vals.accuracy >= 90) _runConfetti(overlay);
             }
         };
         requestAnimationFrame(tick);
