@@ -834,32 +834,32 @@ async function _ndRenderShareCard(data, overlayEl) {
         glowClear(); spaced(0);
     }
 
-    // Per-section accuracy — a HORIZONTAL row of chips (sharable cards read
-    // better horizontally). Colour bands stay positive: green / cyan / amber,
-    // never a failure red. "Song as a sum of its parts," framed to improve.
-    const secs = Array.isArray(d.sections) ? d.sections.slice(0, 6) : [];
+    // Per-section accuracy — a vertical list of % meters (name · bar · %).
+    // Colour bands stay positive: green / cyan / amber, never a failure red.
+    const secs = Array.isArray(d.sections) ? d.sections.slice(0, 5) : [];
     if (secs.length) {
         spaced(3); ctx.fillStyle = dim; font(15, fDisp, 600);
-        ctx.fillText('SECTIONS', P, 250); spaced(0);
-        const rowY = 276, rowH = 116, gap = 14, totalW = W - P * 2;
-        const chipW = (totalW - gap * (secs.length - 1)) / secs.length;
-        secs.forEach((sec, i) => {
+        ctx.fillText('SECTIONS', P, 252); spaced(0);
+        const barX = P + 160, barW = 320, rowH = 36;
+        let y = 292;
+        for (const sec of secs) {
             const acc = Math.max(0, Math.min(100, Math.round(sec.acc)));
-            const col = acc >= 90 ? hit : acc >= 70 ? accent : warn;
-            const cx = P + i * (chipW + gap);
-            ctx.fillStyle = 'rgba(255,255,255,0.045)';
-            if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(cx, rowY, chipW, rowH, 12); ctx.fill(); }
-            else ctx.fillRect(cx, rowY, chipW, rowH);
-            ctx.fillStyle = col;   // band strip across the top of the chip
-            if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(cx, rowY, chipW, 5, 3); ctx.fill(); }
-            else ctx.fillRect(cx, rowY, chipW, 5);
-            ctx.textAlign = 'center';
-            spaced(1); ctx.fillStyle = dim; font(15, fDisp, 600);
-            ctx.fillText(fit(sec.name, chipW - 16), cx + chipW / 2, rowY + 42); spaced(0);
-            glowSet(col); ctx.fillStyle = col; font(42, fDisp, 700);
-            ctx.fillText(acc + '%', cx + chipW / 2, rowY + 90); glowClear();
-        });
-        ctx.textAlign = 'left';
+            const barColor = acc >= 90 ? hit : acc >= 70 ? accent : warn;
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = text; font(18, fDisp, 600);
+            ctx.fillText(fit(sec.name, 140), P, y);
+            ctx.fillStyle = 'rgba(255,255,255,0.10)';      // track
+            if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(barX, y - 7, barW, 14, 7); ctx.fill(); }
+            else ctx.fillRect(barX, y - 7, barW, 14);
+            ctx.fillStyle = barColor;                       // fill
+            const fw = Math.max(8, barW * acc / 100);
+            if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(barX, y - 7, fw, 14, 7); ctx.fill(); }
+            else ctx.fillRect(barX, y - 7, fw, 14);
+            glowSet(barColor); ctx.fillStyle = barColor; font(18, fDisp, 700);
+            ctx.fillText(acc + '%', barX + barW + 16, y); glowClear();
+            y += rowH;
+        }
+        ctx.textBaseline = 'alphabetic';
     }
 
     // Stat strip across the bottom — note counts as fractions of judged total.
