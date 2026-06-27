@@ -844,7 +844,7 @@ async function _ndRenderShareCard(data, overlayEl) {
         let y = 292;
         for (const sec of secs) {
             const acc = Math.max(0, Math.min(100, Math.round(sec.acc)));
-            const barColor = acc >= 90 ? hit : acc >= 70 ? accent : warn;
+            const barColor = acc >= 90 ? hit : warn;   // green only at 90%+, else amber
             ctx.textBaseline = 'middle';
             ctx.fillStyle = text; font(18, fDisp, 600);
             ctx.fillText(fit(sec.name, 140), P, y);
@@ -14976,9 +14976,9 @@ function createNoteDetector(options = {}) {
             for (const sec of sectionStats) {
                 const secTotal = sec.hits + sec.misses;
                 const secAcc = secTotal > 0 ? Math.round((sec.hits / secTotal) * 100) : 0;
-                // Positive colour bands — green / cyan / amber, never a failure
-                // red (sections are framed "to improve").
-                const cls = secAcc >= 90 ? 'nd-bar-good' : secAcc >= 70 ? 'nd-bar-cool' : 'nd-bar-mid';
+                // Green only at 90%+; everything below is amber ("to improve").
+                // Never a failure red.
+                const cls = secAcc >= 90 ? 'nd-bar-good' : 'nd-bar-mid';
                 // Per-section practice button: loops that section's time range
                 // on replay. Only when we can re-launch the song AND we know the
                 // section's bounds.
