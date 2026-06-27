@@ -291,7 +291,7 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // exact build that produced it. The script tag has no `import`/`fetch`
 // hook to read package.json at load time, so this is the single
 // hand-maintained constant the diagnostic path keys off of.
-const _ND_VERSION = '1.15.3';
+const _ND_VERSION = '1.16.0';
 
 // Audio processing constants
 const _ND_MIN_YIN_SAMPLES = 4096;  // enough for low E at 48kHz (need tau=585, halfLen=2048)
@@ -644,6 +644,199 @@ function _ndGradeFor(accuracy) {
         : accuracy >= 70 ? 'C'
         : accuracy >= 60 ? 'D'
         : 'F';
+}
+
+// ── Results-card share image (Copy card / Save) ──────────────────────────
+// A shareable PNG of the end-of-song results, rendered in note_detect's own
+// skin (palette + display fonts read live off the overlay), NOT the host's.
+// Mirrors the robust host-checked fallback ladder used elsewhere in the
+// ecosystem: image→clipboard → download PNG → text.
+
+// Human label for an arrangement string (the "instrument / track" played).
+// getSongInfo().arrangement is a free-form chart label ('Lead', 'Bass',
+// 'rhythm', …) — title-case the leading word so it reads on the card.
+function _ndInstrumentLabel(arrangement) {
+    if (!arrangement) return '';
+    const s = String(arrangement).trim();
+    if (!s) return '';
+    return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+// Clipboard text fallback (when image copy + download both fail).
+function _ndShareCardText(data) {
+    const d = data || {};
+    const what = d.title || 'My run';
+    const inst = d.instrument ? ` (${d.instrument})` : '';
+    const tail = [`Grade ${d.grade}`, `${d.accuracy}%`, `${d.score} pts`];
+    if (d.fullCombo) tail.push('Full Combo');
+    return `fee[dB]ack — ${what}${inst}\n${tail.join(' · ')}`;
+}
+
+// Download filename — slugged from the song title.
+function _ndShareCardFilename(data) {
+    const d = data || {};
+    const base = String(d.title || 'score-card')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 48) || 'score-card';
+    return `feedback-${base}.png`;
+}
+
+// Render the results into a 1200×630 canvas using the live skin. Returns the
+// canvas, or null when canvas/2d isn't available (vm sandbox / old host).
+async function _ndRenderShareCard(data, overlayEl) {
+    const d = data || {};
+    if (typeof document === 'undefined' || !document.createElement) return null;
+    const cv = document.createElement('canvas');
+    cv.width = 1200; cv.height = 630;
+    const ctx = cv.getContext && cv.getContext('2d');
+    if (!ctx) return null;
+    // The bundled display fonts (Orbitron / Rajdhani / Russo One / Black Ops
+    // One) are document-loaded by the stylesheet; wait so the canvas text
+    // matches the on-screen card instead of falling back to a system font.
+    try { if (document.fonts && document.fonts.ready) await document.fonts.ready; } catch (e) {}
+
+    // Resolve the active skin's palette + fonts off the overlay's computed
+    // style (it carries data-nd-skin), with the neon defaults as fallback.
+    const cssVar = (name, fallback) => {
+        try {
+            if (overlayEl && typeof getComputedStyle === 'function') {
+                const v = getComputedStyle(overlayEl).getPropertyValue(name).trim();
+                if (v) return v;
+            }
+        } catch (e) {}
+        return fallback;
+    };
+    const accent  = cssVar('--nd-accent',  '#00f0ff');
+    const accent2 = cssVar('--nd-accent2', '#ff2ec4');
+    const hit     = cssVar('--nd-hit',     '#00ff88');
+    const miss    = cssVar('--nd-miss',    '#ff4444');
+    const text    = cssVar('--nd-text',    '#e8f6ff');
+    const dim     = cssVar('--nd-dim',     '#7c93a8');
+    const bg      = cssVar('--nd-bg',      'rgba(6,10,24,0.82)');
+    const fDisp   = cssVar('--nd-font-display', "'Orbitron', sans-serif");
+    const fGrade  = cssVar('--nd-font-grade',   "'Orbitron', sans-serif");
+    const gradeColor = d.grade === 'S' ? accent2
+        : (d.grade === 'D' || d.grade === 'F') ? miss : accent;
+
+    const W = 1200, H = 630, P = 72;
+    const font = (px, stack, weight) => { ctx.font = `${weight || 700} ${px}px ${stack}`; };
+    const fit = (s, maxW) => {
+        s = String(s == null ? '' : s);
+        if (ctx.measureText(s).width <= maxW) return s;
+        let t = s;
+        while (t.length > 1 && ctx.measureText(t + '…').width > maxW) t = t.slice(0, -1);
+        return t + '…';
+    };
+    const spaced = (px) => { try { ctx.letterSpacing = px + 'px'; } catch (e) {} };
+
+    // Opaque base first (--nd-bg can be translucent → no see-through PNG).
+    ctx.fillStyle = '#0a0e1a'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = accent; ctx.fillRect(0, 0, W, 6);                 // accent spine
+    ctx.strokeStyle = 'rgba(255,255,255,0.10)'; ctx.lineWidth = 1;
+    ctx.strokeRect(28.5, 28.5, W - 57, H - 57);                       // hairline frame
+    ctx.textBaseline = 'alphabetic';
+
+    const heroMaxW = W - P * 2 - 240;   // leave room for the grade stamp at right
+
+    // Eyebrow
+    spaced(6); ctx.fillStyle = dim; font(20, fDisp, 700);
+    ctx.fillText('SONG COMPLETE', P, 96); spaced(0);
+    // Hero song title
+    let heroSize = 74; font(heroSize, fDisp, 800);
+    const heroText = d.title || 'Song Complete';
+    if (ctx.measureText(heroText).width > heroMaxW) { heroSize = 54; font(heroSize, fDisp, 800); }
+    ctx.fillStyle = text; ctx.fillText(fit(heroText, heroMaxW), P, 184);
+    // Sub: artist · instrument
+    const sub = [d.artist, d.instrument].filter(Boolean).join('   ·   ');
+    if (sub) { spaced(2); ctx.fillStyle = dim; font(26, fDisp, 500); ctx.fillText(fit(sub.toUpperCase(), heroMaxW), P, 226); spaced(0); }
+
+    // Grade stamp (top-right), full-combo callout under it.
+    font(150, fGrade, 700); ctx.fillStyle = gradeColor;
+    const gW = ctx.measureText(d.grade).width;
+    ctx.fillText(d.grade, W - P - gW, 200);
+    if (d.fullCombo) {
+        spaced(4); ctx.fillStyle = hit; font(20, fDisp, 700);
+        const fcW = ctx.measureText('FULL COMBO').width + 4 * 9;
+        ctx.fillText('FULL COMBO', W - P - fcW, 238); spaced(0);
+    }
+
+    // Stat strip across the bottom.
+    const stats = [
+        { label: 'ACCURACY',    value: d.accuracy + '%',      color: text },
+        { label: 'SCORE',       value: String(d.score),       color: accent },
+        { label: 'HITS',        value: String(d.hits),        color: hit },
+        { label: 'MISSES',      value: String(d.misses),      color: miss },
+        { label: 'BEST STREAK', value: String(d.bestStreak),  color: text },
+        { label: 'MAX MULT',    value: '×' + d.maxMultiplier, color: accent2 },
+    ];
+    const colW = (W - P * 2) / stats.length;
+    const sy = 478;
+    stats.forEach((st, i) => {
+        const x = P + colW * i;
+        spaced(2); ctx.fillStyle = dim; font(16, fDisp, 600); ctx.fillText(st.label, x, sy); spaced(0);
+        ctx.fillStyle = st.color; font(46, fDisp, 700); ctx.fillText(st.value, x, sy + 54);
+    });
+
+    // Footer brand.
+    spaced(2); ctx.fillStyle = dim; font(18, fDisp, 500);
+    ctx.fillText('FEE[dB]ACK · NOTE DETECTION', P, H - 44); spaced(0);
+    return cv;
+}
+
+// Copy/download with the host-checked fallback ladder: image→clipboard (kept
+// a live Promise so the click activation survives) → download PNG → text.
+// Returns 'copied' | 'saved' | 'copied-text' | 'failed'.
+async function _ndShareCardAction(data, action, overlayEl) {
+    const cv = await _ndRenderShareCard(data, overlayEl);
+    if (!cv || !cv.toBlob) {
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(_ndShareCardText(data)); return 'copied-text';
+            }
+        } catch (e) {}
+        return 'failed';
+    }
+    const toBlob = () => new Promise((r) => cv.toBlob(r, 'image/png'));
+    const download = async () => {
+        const b = await toBlob(); if (!b) return false;
+        const url = URL.createObjectURL(b);
+        const a = document.createElement('a');
+        a.href = url; a.download = _ndShareCardFilename(data);
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => { try { URL.revokeObjectURL(url); } catch (e) {} }, 4000);
+        return true;
+    };
+    if (action === 'download') {
+        try { if (await download()) return 'saved'; } catch (e) {}
+    } else {
+        try {
+            if (navigator.clipboard && window.ClipboardItem && window.isSecureContext) {
+                await navigator.clipboard.write([new window.ClipboardItem({ 'image/png': toBlob() })]);
+                return 'copied';
+            }
+        } catch (e) {}
+        try { if (await download()) return 'saved'; } catch (e) {}
+    }
+    try { await navigator.clipboard.writeText(_ndShareCardText(data)); return 'copied-text'; } catch (e) {}
+    return 'failed';
+}
+
+// Click handler for a Copy card / Save button — runs the action and gives
+// transient in-button feedback. Re-enables/restores the label after.
+async function _ndShareCardClick(btn, action, data, overlayEl) {
+    if (!btn) return;
+    const orig = btn.textContent;
+    btn.disabled = true;
+    let res = 'failed';
+    try { res = await _ndShareCardAction(data, action, overlayEl); } catch (e) {}
+    btn.textContent = res === 'copied' ? 'Copied ✓'
+        : res === 'saved' ? 'Saved ✓'
+        : res === 'copied-text' ? 'Copied text ✓'
+        : 'Couldn’t copy';
+    setTimeout(() => { if (btn.isConnected) { btn.textContent = orig; btn.disabled = false; } }, 1600);
 }
 
 function _ndMakeJudgment(opts) {
@@ -14541,6 +14734,33 @@ function createNoteDetector(options = {}) {
         const grade = _ndGradeFor(accuracy);
         const fullCombo = misses === 0;
 
+        // Song identity for the card + the shareable image. Captured at BUILD
+        // time: by the time the user taps a button the host may have navigated
+        // and getSongInfo() would return {}. arrangement_index + filename feed
+        // the Retry path (same song, same instrument).
+        const _summaryHw = resolveHw();
+        const _summaryInfo = (_summaryHw && _summaryHw.getSongInfo)
+            ? (_summaryHw.getSongInfo() || {}) : {};
+        const songTitle = _summaryInfo.title ? String(_summaryInfo.title) : '';
+        const songArtist = _summaryInfo.artist ? String(_summaryInfo.artist) : '';
+        const instrument = _ndInstrumentLabel(_summaryInfo.arrangement);
+        const arrangementIndex = Number.isFinite(_summaryInfo.arrangement_index)
+            ? _summaryInfo.arrangement_index : undefined;
+        const retryFilename = _ndShared.currentFilename || '';
+        const canRetry = !!retryFilename && typeof window.playSong === 'function';
+        const shareData = {
+            title: songTitle, artist: songArtist, instrument,
+            grade, accuracy, score, hits, misses, bestStreak, maxMultiplier, fullCombo,
+        };
+        const metaSub = [songArtist, instrument].filter(Boolean).join(' · ');
+        const songMetaHtml = (songTitle || metaSub)
+            ? `<div class="nd-sum-songmeta">${
+                songTitle ? `<div class="nd-sum-song-title">${_ndEscapeHtml(songTitle)}</div>` : ''
+              }${
+                metaSub ? `<div class="nd-sum-song-sub">${_ndEscapeHtml(metaSub)}</div>` : ''
+              }</div>`
+            : '';
+
         let sectionHtml = '';
         if (sectionStats.length > 0) {
             sectionHtml = '<div class="nd-sum-sections"><div class="nd-sum-subhead">Per Section</div>';
@@ -14649,6 +14869,7 @@ function createNoteDetector(options = {}) {
             <div class="nd-sum-shell">
             <div class="nd-sum-panel">
                 <div class="nd-sum-header">Song Complete</div>
+                ${songMetaHtml}
                 <div class="nd-sum-grade-wrap">
                     <canvas class="nd-sum-confetti"></canvas>
                     <div class="nd-sum-grade" data-grade="${grade}">${grade}</div>
@@ -14668,17 +14889,27 @@ function createNoteDetector(options = {}) {
                 ${breakdownHtml}
                 ${sectionHtml}
                 ${diagnosticPlayHtml}
+                <div class="nd-sum-share">
+                    <button type="button" class="nd-summary-copy nd-btn"
+                            title="Copy a shareable score card to the clipboard">Copy card</button>
+                    <button type="button" class="nd-summary-save nd-btn"
+                            title="Save the score card as a PNG">⤓ Save</button>
+                </div>
                 <div class="nd-sum-actions">
                     ${showReturnPrevBtn ? `
                     <button type="button" class="nd-summary-return-prev nd-btn">
                         Return to Previous Song
                     </button>` : ''}
                     ${tuningMode ? `
-                    <button class="nd-summary-download nd-btn nd-btn-primary">
+                    <button class="nd-summary-download nd-btn">
                         Download Diagnostic JSON
                     </button>` : ''}
-                    <button class="nd-summary-close nd-btn">
-                        Close
+                    ${canRetry ? `
+                    <button type="button" class="nd-summary-retry nd-btn nd-btn-primary">
+                        Retry Song
+                    </button>` : ''}
+                    <button type="button" class="nd-summary-close nd-btn${canRetry ? '' : ' nd-btn-primary'}">
+                        Exit Song
                     </button>
                 </div>
             </div>
@@ -14687,6 +14918,43 @@ function createNoteDetector(options = {}) {
         `;
         const closeBtn = overlay.querySelector('.nd-summary-close');
         if (closeBtn) closeBtn.onclick = () => _ndDismissSummary(true);
+        // Copy card / Save — render the share image in the active skin.
+        const copyBtn = overlay.querySelector('.nd-summary-copy');
+        if (copyBtn) copyBtn.onclick = () => _ndShareCardClick(copyBtn, 'copy', shareData, overlay);
+        const saveBtn = overlay.querySelector('.nd-summary-save');
+        if (saveBtn) saveBtn.onclick = () => _ndShareCardClick(saveBtn, 'download', shareData, overlay);
+        // Retry Song — replay the same song + same arrangement (instrument).
+        // Mirrors the Return-to-Previous-Song handler: we navigate ourselves,
+        // so drop the auto-exit hold up front and only fall back to releasing
+        // it (→ menu) if playSong rejects, leaving the user stranded.
+        const retryBtn = overlay.querySelector('.nd-summary-retry');
+        if (retryBtn) {
+            retryBtn.onclick = () => {
+                if (!canRetry) { _ndDismissSummary(true); return; }
+                const release = _ndAutoExitRelease;
+                _ndAutoExitRelease = null;
+                overlay.remove();
+                const _fallback = () => { if (release) { try { release(); } catch (e) {} } };
+                try {
+                    const p = window.playSong(
+                        encodeURIComponent(retryFilename),
+                        arrangementIndex,
+                        { bridge: false },
+                    );
+                    if (p && typeof p.then === 'function') {
+                        p.catch((e) => {
+                            console.warn('[note_detect] retry song failed:',
+                                e && e.message ? e.message : e);
+                            _fallback();
+                        });
+                    }
+                } catch (e) {
+                    console.warn('[note_detect] retry song failed:',
+                        e && e.message ? e.message : e);
+                    _fallback();
+                }
+            };
+        }
         const returnPrevBtn = overlay.querySelector('.nd-summary-return-prev');
         if (returnPrevBtn) {
             returnPrevBtn.onclick = () => {

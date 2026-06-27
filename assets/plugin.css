@@ -597,11 +597,49 @@ body:has(#v3-upnext) .nd-hud {
     color: var(--nd-dim);
 }
 
+/* Song identity under the header — title gives screenshots context, the sub
+   line carries artist · instrument (the track played). */
+.nd-sum-songmeta {
+    text-align: center;
+    margin: 0.1rem 0 0.5rem;
+}
+.nd-sum-song-title {
+    font-family: var(--nd-font-display);
+    font-size: 1.05rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: var(--nd-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.nd-sum-song-sub {
+    margin-top: 0.12rem;
+    font-size: 0.66rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--nd-dim);
+}
+
+/* Share row (Copy card / Save) — sits just above the primary actions. */
+.nd-sum-share {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.9rem;
+}
+.nd-sum-share .nd-btn {
+    font-size: 0.72rem;
+    padding: 0.42rem 0.7rem;
+}
+
 /* Action buttons. */
 .nd-sum-actions {
     display: flex;
     gap: 0.5rem;
     margin-top: 1rem;
+}
+.nd-sum-share + .nd-sum-actions {
+    margin-top: 0.5rem;
 }
 .nd-btn {
     flex: 1;
