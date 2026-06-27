@@ -171,6 +171,17 @@
 // flag, instance registry, playSong-hook retry counter) lives on it
 // so reassignments land on the canonical object, not on a fresh
 // module-scope copy.
+// ── Desktop-bridge back-compat ──────────────────────────────────────────────
+// The host renamed window.slopsmithDesktop → window.feedBackDesktop
+// (got-feedback/feedBack-desktop#40). On desktop builds that still expose only
+// the legacy name, alias it so the feedBackDesktop reads below work on every
+// desktop in any release order. No-op in the browser and on the new bridge.
+try {
+    if (typeof window !== 'undefined' && !window.feedBackDesktop && window.slopsmithDesktop) {
+        window.feedBackDesktop = window.slopsmithDesktop;
+    }
+} catch (_) { /* frozen window — ignore */ }
+
 const _ndShared = (window.__ndShared = window.__ndShared || {
     model: null,          // CREPE/SPICE model (single ~20 MB load)
     modelLoading: false,
