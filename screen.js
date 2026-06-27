@@ -2289,7 +2289,7 @@ function createNoteDetector(options = {}) {
     // changes audio device the detector restarts via the
     // restartAudio chain and refreshes this value.
     let bridgeSampleRate = 48000;
-    // Cached `window.slopsmithDesktop` reference captured at
+    // Cached `window.feedBackDesktop` reference captured at
     // startAudio() when the bridge path is active, so matchNotes()'s
     // chord branch can dispatch `audio.scoreChord(ctx)` without
     // re-resolving from window on every tick. Cleared by stopAudio().
@@ -2413,14 +2413,14 @@ function createNoteDetector(options = {}) {
             return a.getPitchDetection();
         return Promise.resolve(null);
     }
-    // Free an engine source we allocated. Re-resolves window.slopsmithDesktop
+    // Free an engine source we allocated. Re-resolves window.feedBackDesktop
     // because stopAudio() clears bridgeDesktop before destroy() runs.
-    // Best-effort removeSource(id). Re-resolves window.slopsmithDesktop because
+    // Best-effort removeSource(id). Re-resolves window.feedBackDesktop because
     // stopAudio() clears bridgeDesktop. Returns true iff the source was freed
     // (or there was nothing to free).
     function _ndTryFreeSource(id) {
         if (id == null) return true;
-        const d = (typeof window !== 'undefined') ? window.slopsmithDesktop : null;
+        const d = (typeof window !== 'undefined') ? window.feedBackDesktop : null;
         const a = d && d.audio;
         if (!a || typeof a.removeSource !== 'function') return false;
         try {
@@ -2763,7 +2763,7 @@ function createNoteDetector(options = {}) {
             // skips this branch — those callers own the lifecycle and
             // expect a real Web-Audio graph, e.g. for tap-tempo or
             // visualisation taps.
-            const desktop = (typeof window !== 'undefined') ? window.slopsmithDesktop : null;
+            const desktop = (typeof window !== 'undefined') ? window.feedBackDesktop : null;
             const canUseDesktopBridge = !externalStream && !externalAudioCtx
                 && desktop && desktop.isDesktop
                 && desktop.audio
@@ -3300,7 +3300,7 @@ function createNoteDetector(options = {}) {
         // Bridge path doesn't own the JUCE engine — leave audio
         // running for the Audio Plugins panel / other features. Drop
         // the cached preload reference and the flag so a subsequent
-        // enable re-resolves window.slopsmithDesktop fresh.
+        // enable re-resolves window.feedBackDesktop fresh.
         usingDesktopBridge = false;
         usingNativeFrames = false;
         bridgeDesktop = null;
@@ -6829,7 +6829,7 @@ function createNoteDetector(options = {}) {
 
     function _calWizardWizardAudioApi() {
         if (usingDesktopBridge && bridgeDesktop && bridgeDesktop.audio) return bridgeDesktop.audio;
-        const desktop = (typeof window !== 'undefined') ? window.slopsmithDesktop : null;
+        const desktop = (typeof window !== 'undefined') ? window.feedBackDesktop : null;
         return (desktop && desktop.audio) ? desktop.audio : null;
     }
 
@@ -9663,7 +9663,7 @@ function createNoteDetector(options = {}) {
         // This check must be session-independent (the settings panel can open
         // while Detect is off, when bridgeDesktop is null and
         // _ndBridgeRawFramesAvailable() always returns false). Probe
-        // window.slopsmithDesktop directly and accept either getRawAudioFrame
+        // window.feedBackDesktop directly and accept either getRawAudioFrame
         // (default / unbound source) or getSourceRawAudioFrame (source-bound /
         // splitscreen / multi-input), so the toggle is shown for any capable
         // desktop build regardless of audio session state.
@@ -9677,7 +9677,7 @@ function createNoteDetector(options = {}) {
         // hiding the toggle for all unbound instances on such an addon — is
         // a worse trade-off.
         const _ndCanNativeFrames = (function () {
-            const d = (typeof window !== 'undefined') ? window.slopsmithDesktop : null;
+            const d = (typeof window !== 'undefined') ? window.feedBackDesktop : null;
             const a = d && d.isDesktop && d.audio;
             if (!a) return false;
             return typeof a.getRawAudioFrame === 'function'
@@ -10181,7 +10181,7 @@ function createNoteDetector(options = {}) {
         // native addon failed to load, note detection falls back to getUserMedia
         // and the user still needs the browser device list to pick an input.
         const caps = (typeof window !== 'undefined') && window.slopsmith && window.slopsmith.capabilities;
-        const desktop = (typeof window !== 'undefined') ? window.slopsmithDesktop : null;
+        const desktop = (typeof window !== 'undefined') ? window.feedBackDesktop : null;
         let nativeManaged = false;
         if (desktop && desktop.isDesktop && desktop.audio
             && caps && typeof caps.command === 'function'
@@ -12667,7 +12667,7 @@ function createNoteDetector(options = {}) {
         disable({ silent: true });
         // Free the engine input source we allocated for this instance (if any).
         // disable()→stopAudio() already cleared bridgeDesktop, so this re-resolves
-        // window.slopsmithDesktop. No-op for the default singleton / source 0.
+        // window.feedBackDesktop. No-op for the default singleton / source 0.
         _ndReleaseOwnedSource();
         calibrationWizardClose();
         calibrationLabClose();

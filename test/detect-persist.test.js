@@ -48,7 +48,7 @@ function reArmSandbox() {
             sandbox.setInterval = () => 0;
             sandbox.dispatchEvent = () => true;
             sandbox.highway.getSongInfo = () => ({ arrangement: 'lead', stringCount: 6, tuningOffsets: [0, 0, 0, 0, 0, 0], capo: 0 });
-            sandbox.window.slopsmithDesktop = { isDesktop: true, platform: 'linux', audio };
+            sandbox.window.feedBackDesktop = { isDesktop: true, platform: 'linux', audio };
         },
     });
 }

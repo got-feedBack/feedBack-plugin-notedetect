@@ -85,7 +85,7 @@ function loadNativeFrameBridge({ withRawFrames = true } = {}) {
             if (withRawFrames) {
                 audio.getRawAudioFrame = async () => { calls.getRawAudioFrame++; return nativeFrame(); };
             }
-            sandbox.window.slopsmithDesktop = { isDesktop: true, platform: 'darwin', audio };
+            sandbox.window.feedBackDesktop = { isDesktop: true, platform: 'darwin', audio };
         },
     });
     return { createNoteDetector, calls, intervalCallbacks };

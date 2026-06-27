@@ -165,7 +165,7 @@ function loadDetectionCore({ sandboxBeforeRun } = {}) {
     const src = fs.readFileSync(SCRIPT_PATH, 'utf8');
     const sandbox = makeSandbox();
     // Hook for tests that need to inject globals before the plugin's
-    // top-level code runs (e.g. window.slopsmithDesktop for the desktop
+    // top-level code runs (e.g. window.feedBackDesktop for the desktop
     // bridge path). The hook receives the sandbox object directly so it
     // can mutate navigator/window etc. without round-tripping through
     // exports.

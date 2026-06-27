@@ -81,7 +81,7 @@ function containedSandbox({ withVerifierApi = true } = {}) {
             sandbox.highway.getChords = () => ([]);
             sandbox.highway.getTime = () => 0;
             sandbox.highway.getAvOffset = () => 0;
-            sandbox.window.slopsmithDesktop = { isDesktop: true, platform: 'linux', audio };
+            sandbox.window.feedBackDesktop = { isDesktop: true, platform: 'linux', audio };
             slopsmithStub = sandbox.slopsmith;
         },
     });
