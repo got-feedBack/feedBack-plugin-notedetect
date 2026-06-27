@@ -240,3 +240,25 @@ test('_ndSongArtUrl builds a same-origin art URL, preserving DLC path slashes', 
     assert.equal(core.songArtUrl(''), '');
     assert.equal(core.songArtUrl(null), '');
 });
+
+// ── Public results-card API (consumed by other plugins, e.g. Virtuoso) ───
+test('noteDetect exposes render/copy/save results-card methods', () => {
+    const core = loadDetectionCore();
+    const det = core.createNoteDetector();
+    assert.equal(typeof det.renderResultsCard, 'function');
+    assert.equal(typeof det.copyResultsCard, 'function');
+    assert.equal(typeof det.saveResultsCard, 'function');
+    det.destroy();
+});
+
+test('renderResultsCard degrades to null with no 2D canvas (headless), no throw', async () => {
+    const core = loadDetectionCore();
+    const det = core.createNoteDetector();
+    // vm sandbox has no real canvas → the renderer must resolve null, not throw.
+    const cv = await det.renderResultsCard({ eyebrow: 'PRACTICED', hero: 'minor pentatonic in C' });
+    assert.equal(cv, null);
+    // copy/save must also degrade without throwing.
+    await assert.doesNotReject(() => det.copyResultsCard({}));
+    await assert.doesNotReject(() => det.saveResultsCard({}));
+    det.destroy();
+});

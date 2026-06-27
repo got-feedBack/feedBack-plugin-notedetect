@@ -291,7 +291,7 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // exact build that produced it. The script tag has no `import`/`fetch`
 // hook to read package.json at load time, so this is the single
 // hand-maintained constant the diagnostic path keys off of.
-const _ND_VERSION = '1.18.0';
+const _ND_VERSION = '1.19.0';
 
 // Audio processing constants
 const _ND_MIN_YIN_SAMPLES = 4096;  // enough for low E at 48kHz (need tau=585, halfLen=2048)
@@ -816,11 +816,12 @@ async function _ndRenderShareCard(data, overlayEl) {
     }
     const leftMaxW = (artImg ? artX - 28 : W - P) - P;
 
-    // Eyebrow + hero title + sub (top-left).
+    // Eyebrow + hero title + sub (top-left). eyebrow/hero are overridable so
+    // another plugin can drive the same card with its own labels.
     spaced(6); ctx.fillStyle = dim; font(20, fDisp, 700);
-    ctx.fillText('SONG COMPLETE', P, 92); spaced(0);
+    ctx.fillText(String(d.eyebrow || 'SONG COMPLETE').toUpperCase(), P, 92); spaced(0);
     let heroSize = 64; font(heroSize, fDisp, 800);
-    const heroText = d.title || 'Song Complete';
+    const heroText = d.hero || d.title || 'Song Complete';
     if (ctx.measureText(heroText).width > leftMaxW) { heroSize = 48; font(heroSize, fDisp, 800); }
     glowSet(text); ctx.fillStyle = text; ctx.fillText(fit(heroText, leftMaxW), P, 156); glowClear();
     const sub = [d.artist, d.instrument].filter(Boolean).join('   ·   ');
@@ -863,8 +864,9 @@ async function _ndRenderShareCard(data, overlayEl) {
     }
 
     // Stat strip across the bottom — note counts as fractions of judged total.
+    // A consumer may override the whole strip via d.stats [{label,value,color?}].
     const total = (d.hits || 0) + (d.misses || 0);
-    const stats = [
+    const stats = (Array.isArray(d.stats) && d.stats.length) ? d.stats.slice(0, 6) : [
         { label: 'ACCURACY',    value: d.accuracy + '%',          color: text },
         { label: 'SCORE',       value: String(d.score),           color: accent },
         { label: 'HITS',        value: d.hits + '/' + total,      color: hit },
@@ -876,14 +878,16 @@ async function _ndRenderShareCard(data, overlayEl) {
     const sy = 520;
     stats.forEach((st, i) => {
         const x = P + colW * i;
-        spaced(2); ctx.fillStyle = dim; font(15, fDisp, 600); ctx.fillText(st.label, x, sy); spaced(0);
-        glowSet(st.color); ctx.fillStyle = st.color; font(36, fDisp, 700);
-        ctx.fillText(fit(st.value, colW - 14), x, sy + 46); glowClear();
+        const col = st.color || text;
+        spaced(2); ctx.fillStyle = dim; font(15, fDisp, 600);
+        ctx.fillText(String(st.label || '').toUpperCase(), x, sy); spaced(0);
+        glowSet(col); ctx.fillStyle = col; font(36, fDisp, 700);
+        ctx.fillText(fit(String(st.value == null ? '' : st.value), colW - 14), x, sy + 46); glowClear();
     });
 
-    // Footer brand.
+    // Footer brand (overridable for a consuming plugin).
     spaced(2); ctx.fillStyle = dim; font(16, fDisp, 500);
-    ctx.fillText('FEE[dB]ACK · NOTE DETECTION', P, H - 26); spaced(0);
+    ctx.fillText(String(d.brand || 'FEE[dB]ACK · NOTE DETECTION'), P, H - 26); spaced(0);
     return cv;
 }
 
@@ -15572,6 +15576,21 @@ function createNoteDetector(options = {}) {
         getVerifierOffset,
         injectButton,
         showSummary,
+        // ── Public results-card API (consumed by other plugins, e.g. Virtuoso)
+        // Render / copy / save the shareable results card from a caller-supplied
+        // data object so any plugin reuses ONE canonical card implementation
+        // instead of duplicating it. `data` fields (all optional): eyebrow,
+        // hero (or title), artist, instrument, artUrl, accuracy, score, hits,
+        // misses, bestStreak, maxMultiplier, fullCombo, sections [{name,acc}],
+        // extraLabel/extraValue, stats [{label,value,color}] (overrides the
+        // default stat strip), brand (footer). `opts.overlayEl` supplies the
+        // skin palette (defaults to note_detect's neon when omitted).
+        renderResultsCard: (data, opts) =>
+            _ndRenderShareCard(data || {}, (opts && opts.overlayEl) || null),
+        copyResultsCard: (data, opts) =>
+            _ndShareCardAction(data || {}, 'copy', (opts && opts.overlayEl) || null),
+        saveResultsCard: (data, opts) =>
+            _ndSaveCard(data || {}, (opts && opts.overlayEl) || null),
         // Diagnostic export (#254 follow-up). `downloadDiagnostic()`
         // triggers a browser file save of the current session's
         // breakdown + capped event log; `getDiagnostic()` returns the
