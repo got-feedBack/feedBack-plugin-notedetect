@@ -383,7 +383,7 @@ body:has(#v3-upnext) .nd-hud {
 
 .nd-sum-panel {
     position: relative;            /* positioning context for the confetti overlay */
-    width: 26rem;
+    width: 34rem;                  /* wider framing — fits the per-section practice buttons */
     max-width: 92vw;
     max-height: 88vh;
     overflow-y: auto;
@@ -620,6 +620,35 @@ body:has(#v3-upnext) .nd-hud {
 .nd-bar-dim  { background: var(--nd-dim); }
 .nd-bar-alt  { background: var(--nd-accent2); }
 .nd-bar-cool { background: var(--nd-accent); }
+/* Section % readout — fixed width so the practice button lines up across rows. */
+.nd-sum-bar-val {
+    flex: 0 0 auto;
+    min-width: 2.4rem;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: var(--nd-text);
+    opacity: 0.85;
+}
+/* Per-section "Practice This Section" loop button — compact outline pill. */
+.nd-sum-practice {
+    flex: 0 0 auto;
+    pointer-events: auto;
+    cursor: pointer;
+    padding: 0.2rem 0.6rem;
+    font-family: var(--nd-font-display);
+    font-size: 0.58rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    color: var(--nd-accent);
+    background: transparent;
+    border: 1px solid var(--nd-accent);
+    border-radius: 99px;
+    transition: background 0.15s, color 0.15s;
+}
+.nd-sum-practice:hover { background: var(--nd-accent); color: #06121c; }
+.nd-sum-practice:focus-visible { outline: 2px solid var(--nd-accent); outline-offset: 2px; }
 
 .nd-sum-note {
     margin-top: 0.4rem;

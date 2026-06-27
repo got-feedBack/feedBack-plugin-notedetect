@@ -291,7 +291,7 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // exact build that produced it. The script tag has no `import`/`fetch`
 // hook to read package.json at load time, so this is the single
 // hand-maintained constant the diagnostic path keys off of.
-const _ND_VERSION = '1.17.0';
+const _ND_VERSION = '1.18.0';
 
 // Audio processing constants
 const _ND_MIN_YIN_SAMPLES = 4096;  // enough for low E at 48kHz (need tau=585, halfLen=2048)
@@ -770,6 +770,7 @@ async function _ndRenderShareCard(data, overlayEl) {
     const miss    = cssVar('--nd-miss',    '#ff4444');
     const text    = cssVar('--nd-text',    '#e8f6ff');
     const dim     = cssVar('--nd-dim',     '#7c93a8');
+    const warn    = cssVar('--nd-warn',    '#ffcc00');
     const bg      = cssVar('--nd-bg',      'rgba(6,10,24,0.82)');
     const fDisp   = cssVar('--nd-font-display', "'Orbitron', sans-serif");
 
@@ -833,31 +834,32 @@ async function _ndRenderShareCard(data, overlayEl) {
         glowClear(); spaced(0);
     }
 
-    // Per-section accuracy bars (left column) — "revisit", never "failed".
-    const secs = Array.isArray(d.sections) ? d.sections.slice(0, 5) : [];
+    // Per-section accuracy — a HORIZONTAL row of chips (sharable cards read
+    // better horizontally). Colour bands stay positive: green / cyan / amber,
+    // never a failure red. "Song as a sum of its parts," framed to improve.
+    const secs = Array.isArray(d.sections) ? d.sections.slice(0, 6) : [];
     if (secs.length) {
         spaced(3); ctx.fillStyle = dim; font(15, fDisp, 600);
         ctx.fillText('SECTIONS', P, 250); spaced(0);
-        const barX = P + 170, barW = 300, rowH = 34;
-        let y = 284;
-        for (const sec of secs) {
+        const rowY = 276, rowH = 116, gap = 14, totalW = W - P * 2;
+        const chipW = (totalW - gap * (secs.length - 1)) / secs.length;
+        secs.forEach((sec, i) => {
             const acc = Math.max(0, Math.min(100, Math.round(sec.acc)));
-            const barColor = acc >= 90 ? hit : acc >= 70 ? accent : miss;
-            ctx.textBaseline = 'middle';
-            ctx.fillStyle = text; font(18, fDisp, 600);
-            ctx.fillText(fit(sec.name, 150), P, y);
-            ctx.fillStyle = 'rgba(255,255,255,0.10)';
-            if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(barX, y - 6, barW, 12, 6); ctx.fill(); }
-            else ctx.fillRect(barX, y - 6, barW, 12);
-            ctx.fillStyle = barColor;
-            const fw = Math.max(6, barW * acc / 100);
-            if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(barX, y - 6, fw, 12, 6); ctx.fill(); }
-            else ctx.fillRect(barX, y - 6, fw, 12);
-            ctx.fillStyle = text; font(17, fDisp, 700);
-            ctx.fillText(acc + '%', barX + barW + 14, y);
-            y += rowH;
-        }
-        ctx.textBaseline = 'alphabetic';
+            const col = acc >= 90 ? hit : acc >= 70 ? accent : warn;
+            const cx = P + i * (chipW + gap);
+            ctx.fillStyle = 'rgba(255,255,255,0.045)';
+            if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(cx, rowY, chipW, rowH, 12); ctx.fill(); }
+            else ctx.fillRect(cx, rowY, chipW, rowH);
+            ctx.fillStyle = col;   // band strip across the top of the chip
+            if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(cx, rowY, chipW, 5, 3); ctx.fill(); }
+            else ctx.fillRect(cx, rowY, chipW, 5);
+            ctx.textAlign = 'center';
+            spaced(1); ctx.fillStyle = dim; font(15, fDisp, 600);
+            ctx.fillText(fit(sec.name, chipW - 16), cx + chipW / 2, rowY + 42); spaced(0);
+            glowSet(col); ctx.fillStyle = col; font(42, fDisp, 700);
+            ctx.fillText(acc + '%', cx + chipW / 2, rowY + 90); glowClear();
+        });
+        ctx.textAlign = 'left';
     }
 
     // Stat strip across the bottom — note counts as fractions of judged total.
@@ -866,7 +868,7 @@ async function _ndRenderShareCard(data, overlayEl) {
         { label: 'ACCURACY',    value: d.accuracy + '%',          color: text },
         { label: 'SCORE',       value: String(d.score),           color: accent },
         { label: 'HITS',        value: d.hits + '/' + total,      color: hit },
-        { label: 'MISSES',      value: d.misses + '/' + total,    color: miss },
+        { label: (d.extraLabel || 'Top Section').toUpperCase(), value: d.extraValue || '—', color: accent },
         { label: 'BEST STREAK', value: String(d.bestStreak),      color: text },
         { label: 'MAX MULT',    value: '×' + d.maxMultiplier,     color: accent2 },
     ];
@@ -875,7 +877,8 @@ async function _ndRenderShareCard(data, overlayEl) {
     stats.forEach((st, i) => {
         const x = P + colW * i;
         spaced(2); ctx.fillStyle = dim; font(15, fDisp, 600); ctx.fillText(st.label, x, sy); spaced(0);
-        glowSet(st.color); ctx.fillStyle = st.color; font(36, fDisp, 700); ctx.fillText(st.value, x, sy + 46); glowClear();
+        glowSet(st.color); ctx.fillStyle = st.color; font(36, fDisp, 700);
+        ctx.fillText(fit(st.value, colW - 14), x, sy + 46); glowClear();
     });
 
     // Footer brand.
@@ -14897,14 +14900,63 @@ function createNoteDetector(options = {}) {
         const retryFilename = _ndShared.currentFilename || '';
         const canRetry = !!retryFilename && typeof window.playSong === 'function';
         const artUrl = _ndSongArtUrl(retryFilename);
+        // Section time ranges (for the per-section "Practice This Section"
+        // loop buttons). Captured now from the live highway — getSections()
+        // returns [{time,name}] in chart order; a section's end is the next
+        // section's start (or the song's end). First occurrence wins for a
+        // repeated name (sectionStats dedupes by name).
+        const _hwSections = (_summaryHw && _summaryHw.getSections)
+            ? (_summaryHw.getSections() || []) : [];
+        const _sectionRange = (name) => {
+            for (let i = 0; i < _hwSections.length; i++) {
+                if (!_hwSections[i] || _hwSections[i].name !== name) continue;
+                const start = Number(_hwSections[i].time);
+                if (!Number.isFinite(start)) return null;
+                let end = (i + 1 < _hwSections.length) ? Number(_hwSections[i + 1].time) : NaN;
+                if (!Number.isFinite(end) || end <= start) {
+                    let d = Number(_summaryInfo.duration) || 0;
+                    if (d > 6000) d /= 1000;
+                    end = (d > start) ? d : start + 30;
+                }
+                return { start, end };
+            }
+            return null;
+        };
         const shareSections = sectionStats.map((s) => {
             const t = s.hits + s.misses;
             return { name: s.name, acc: t > 0 ? Math.round((s.hits / t) * 100) : 0 };
         });
+        // Positive replacement for the (punishing) Misses cell: your best
+        // section → else the song length → else the note total. `extraValue`
+        // is the compact form for the share strip; `extraValueFull` carries
+        // the section name where the popup has room.
+        let _topSec = null;
+        for (const s of sectionStats) {
+            const t = s.hits + s.misses;
+            if (t <= 0) continue;
+            const acc = Math.round((s.hits / t) * 100);
+            if (!_topSec || acc > _topSec.acc) _topSec = { name: s.name, acc };
+        }
+        let _durSec = Number(_summaryInfo.duration) || 0;
+        if (_durSec > 6000) _durSec /= 1000;   // guard ms vs s (no song is >100 min)
+        const _fmtDur = (n) => {
+            n = Math.max(0, Math.round(n));
+            return Math.floor(n / 60) + ':' + String(n % 60).padStart(2, '0');
+        };
+        let extraLabel, extraValue, extraValueFull;
+        if (_topSec) {
+            extraLabel = 'Top Section';
+            extraValue = _topSec.name;        // share card: section name
+            extraValueFull = _topSec.name;    // popup: section name too (was name · %)
+        } else if (_durSec > 0) {
+            extraLabel = 'Length'; extraValue = _fmtDur(_durSec); extraValueFull = extraValue;
+        } else {
+            extraLabel = 'Notes'; extraValue = String(total); extraValueFull = extraValue;
+        }
         const shareData = {
             title: songTitle, artist: songArtist, instrument, artUrl,
             accuracy, score, hits, misses, bestStreak, maxMultiplier, fullCombo,
-            sections: shareSections,
+            sections: shareSections, extraLabel, extraValue,
         };
         const metaSub = [songArtist, instrument].filter(Boolean).join(' · ');
         const songMetaHtml = (songTitle || metaSub)
@@ -14924,12 +14976,22 @@ function createNoteDetector(options = {}) {
             for (const sec of sectionStats) {
                 const secTotal = sec.hits + sec.misses;
                 const secAcc = secTotal > 0 ? Math.round((sec.hits / secTotal) * 100) : 0;
-                const cls = secAcc >= 90 ? 'nd-bar-good' : secAcc >= 70 ? 'nd-bar-mid' : 'nd-bar-bad';
+                // Positive colour bands — green / cyan / amber, never a failure
+                // red (sections are framed "to improve").
+                const cls = secAcc >= 90 ? 'nd-bar-good' : secAcc >= 70 ? 'nd-bar-cool' : 'nd-bar-mid';
+                // Per-section practice button: loops that section's time range
+                // on replay. Only when we can re-launch the song AND we know the
+                // section's bounds.
+                const range = canRetry ? _sectionRange(sec.name) : null;
+                const practiceBtn = range
+                    ? `<button type="button" class="nd-sum-practice" data-start="${range.start}" data-end="${range.end}" title="Loop this section to practice it">Practice</button>`
+                    : '';
                 sectionHtml += `
                     <div class="nd-sum-bar-row">
                         <span class="nd-sum-bar-label">${_ndEscapeHtml(sec.name)}</span>
                         <div class="nd-sum-bar-track"><div class="nd-sum-bar-fill ${cls}" style="--nd-bar-w:${secAcc}%"></div></div>
                         <span class="nd-sum-bar-val">${secAcc}%</span>
+                        ${practiceBtn}
                     </div>
                 `;
             }
@@ -15052,7 +15114,7 @@ function createNoteDetector(options = {}) {
                 </div>
                 <div class="nd-sum-stats">
                     <div class="nd-sum-stat" style="--row-i:0"><span class="nd-sum-stat-label">Hits</span><span class="nd-sum-stat-val nd-val-good">${hits}/${total}</span></div>
-                    <div class="nd-sum-stat" style="--row-i:1"><span class="nd-sum-stat-label">Misses</span><span class="nd-sum-stat-val nd-val-bad">${misses}/${total}</span></div>
+                    <div class="nd-sum-stat" style="--row-i:1"><span class="nd-sum-stat-label">${_ndEscapeHtml(extraLabel)}</span><span class="nd-sum-stat-val nd-val-accent">${_ndEscapeHtml(extraValueFull)}</span></div>
                     <div class="nd-sum-stat" style="--row-i:2"><span class="nd-sum-stat-label">Best Streak</span><span class="nd-sum-stat-val nd-val-accent">${bestStreak}</span></div>
                     <div class="nd-sum-stat" style="--row-i:3"><span class="nd-sum-stat-label">Max Multiplier</span><span class="nd-sum-stat-val nd-val-accent">×${maxMultiplier}</span></div>
                 </div>
@@ -15131,6 +15193,44 @@ function createNoteDetector(options = {}) {
                 }
             };
         }
+        // Per-section "Practice This Section" — replay the song with a loop
+        // armed over that section's time range. Uses the host's load-and-loop
+        // handoff (window._pendingHighwayLoop), the same mechanism the editor's
+        // "Loop in 3D" uses: stash the loop, call playSong, and the host arms
+        // the loop + starts playback once the chart is ready.
+        (overlay.querySelectorAll('.nd-sum-practice') || []).forEach((pBtn) => {
+            pBtn.onclick = () => {
+                if (!canRetry) { _ndDismissSummary(true); return; }
+                const a = Number(pBtn.dataset.start), b = Number(pBtn.dataset.end);
+                const release = _ndAutoExitRelease;
+                _ndAutoExitRelease = null;
+                overlay.remove();
+                const _fallback = () => { if (release) { try { release(); } catch (e) {} } };
+                try {
+                    if (Number.isFinite(a) && Number.isFinite(b) && b > a) {
+                        // returnCtx:null → host applies the loop to the next song
+                        // that becomes ready (the one we're about to load).
+                        window._pendingHighwayLoop = { a, b, returnCtx: null };
+                    }
+                    const p = window.playSong(
+                        encodeURIComponent(retryFilename), arrangementIndex, { bridge: false },
+                    );
+                    if (p && typeof p.then === 'function') {
+                        p.catch((e) => {
+                            console.warn('[note_detect] practice section failed:',
+                                e && e.message ? e.message : e);
+                            try { window._pendingHighwayLoop = null; } catch (_) {}
+                            _fallback();
+                        });
+                    }
+                } catch (e) {
+                    console.warn('[note_detect] practice section failed:',
+                        e && e.message ? e.message : e);
+                    try { window._pendingHighwayLoop = null; } catch (_) {}
+                    _fallback();
+                }
+            };
+        });
         const returnPrevBtn = overlay.querySelector('.nd-summary-return-prev');
         if (returnPrevBtn) {
             returnPrevBtn.onclick = () => {
