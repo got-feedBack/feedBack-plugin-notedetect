@@ -50,7 +50,7 @@ function verifyCtxSandbox() {
             sandbox.highway.getNotes = () => [];
             sandbox.highway.getChords = () => [];
             sandbox.highway.getSongInfo = () => songInfo;
-            sandbox.window.slopsmithDesktop = {
+            sandbox.window.feedBackDesktop = {
                 isDesktop: true,
                 platform: 'linux',
                 audio: {

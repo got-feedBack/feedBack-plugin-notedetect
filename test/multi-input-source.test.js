@@ -52,7 +52,7 @@ function sandboxWithSourceBridge({ partial = false } = {}) {
                 results: ctx.notes.map(n => ({ s: n.s, f: n.f, hit: false, bandEnergy: 0, centsDiff: null, centsError: null })),
             });
             const noDet = { midiNote: -1, confidence: 0, frequency: -1, cents: 0, noteName: '' };
-            sandbox.window.slopsmithDesktop = {
+            sandbox.window.feedBackDesktop = {
                 isDesktop: true, platform: 'linux',
                 audio: {
                     isAvailable: async () => true,

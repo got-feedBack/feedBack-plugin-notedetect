@@ -102,7 +102,7 @@ function engineVerifierSandbox({ withVerifierApi = true, withRawPitch = false } 
             sandbox.highway.getChords = () => ([]);
             sandbox.highway.getTime = () => hwTime;             // mutable playhead
             sandbox.highway.getAvOffset = () => AV_OFFSET_MS;
-            sandbox.window.slopsmithDesktop = { isDesktop: true, platform: 'linux', audio };
+            sandbox.window.feedBackDesktop = { isDesktop: true, platform: 'linux', audio };
         },
     });
 

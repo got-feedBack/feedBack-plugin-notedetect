@@ -175,7 +175,7 @@ function enabledSandbox() {
                 return intervalCallbacks.length;
             };
             sandbox.dispatchEvent = () => true;
-            sandbox.window.slopsmithDesktop = { isDesktop: true, platform: 'linux', audio };
+            sandbox.window.feedBackDesktop = { isDesktop: true, platform: 'linux', audio };
             slopsmithStub = sandbox.slopsmith;
         },
     });

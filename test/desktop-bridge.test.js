@@ -1,6 +1,6 @@
 // Verifies the slopsmith-desktop JUCE bridge branch in startAudio().
 //
-// When the renderer is hosted by slopsmith-desktop, `window.slopsmithDesktop`
+// When the renderer is hosted by slopsmith-desktop, `window.feedBackDesktop`
 // is exposed by the preload script (see slopsmith-desktop/src/main/preload.ts).
 // In that environment the note-detect plugin MUST NOT call
 // `navigator.mediaDevices.getUserMedia` — the native JUCE engine already owns
@@ -31,7 +31,7 @@ function freshSandboxWithBridge(overrides = {}) {
                 calls.getUserMedia++;
                 return Promise.reject(new Error('getUserMedia should not be called on the bridge path'));
             };
-            sandbox.window.slopsmithDesktop = Object.assign({
+            sandbox.window.feedBackDesktop = Object.assign({
                 isDesktop: true,
                 platform: 'linux',
                 audio: {
@@ -103,7 +103,7 @@ test('bridge path: falls back to getUserMedia when audio.isAvailable() resolves 
     det.destroy();
 });
 
-test('bridge path: browser environment (no window.slopsmithDesktop) still uses getUserMedia', async () => {
+test('bridge path: browser environment (no window.feedBackDesktop) still uses getUserMedia', async () => {
     // No bridge sandbox — vanilla loader. getUserMedia in the default
     // navigator stub rejects, so enable() returns false; we just want
     // to confirm the bridge branch did NOT swallow execution.
@@ -112,7 +112,7 @@ test('bridge path: browser environment (no window.slopsmithDesktop) still uses g
     const result = await det.enable();
     // enable() returns false when startAudio() returns false; the
     // important invariant is that we don't crash trying to read
-    // window.slopsmithDesktop.
+    // window.feedBackDesktop.
     assert.equal(typeof result, 'boolean');
     det.destroy();
 });
@@ -174,7 +174,7 @@ test('bridge path: chord scoring wiring — calls scoreChord IPC, never subscrib
                     { s: 2, f: 0 },
                 ]},
             ]);
-            sandbox.window.slopsmithDesktop = {
+            sandbox.window.feedBackDesktop = {
                 isDesktop: true,
                 platform: 'linux',
                 audio: {
@@ -294,7 +294,7 @@ test('bridge path: dedup guard — chord already recorded skips scoreChord on su
                     { s: 2, f: 0 },
                 ]},
             ]);
-            sandbox.window.slopsmithDesktop = {
+            sandbox.window.feedBackDesktop = {
                 isDesktop: true,
                 platform: 'linux',
                 audio: {
@@ -379,7 +379,7 @@ test('bridge path: destroy mid-scoreChord does not throw and does not record a l
             sandbox.highway.getChords = () => ([
                 { t: 0, notes: [{ s: 0, f: 0 }, { s: 1, f: 0 }] },
             ]);
-            sandbox.window.slopsmithDesktop = {
+            sandbox.window.feedBackDesktop = {
                 isDesktop: true,
                 platform: 'linux',
                 audio: {
@@ -476,7 +476,7 @@ test('bridge path: enable() opens the onboarding-selected input via the audio-in
                     },
                 },
             });
-            sandbox.window.slopsmithDesktop = {
+            sandbox.window.feedBackDesktop = {
                 isDesktop: true,
                 platform: 'linux',
                 audio: {
@@ -525,7 +525,7 @@ function bridgeWithDetectNotes(detectNotesImpl) {
             sandbox.highway.getChords = () => ([
                 { t: 0, notes: [{ s: 0, f: 0 }, { s: 1, f: 0 }, { s: 2, f: 0 }] },
             ]);
-            sandbox.window.slopsmithDesktop = {
+            sandbox.window.feedBackDesktop = {
                 isDesktop: true,
                 platform: 'linux',
                 audio: {
@@ -692,7 +692,7 @@ test('bridge path: downlevel desktop without scoreChord — chord branch silentl
                     { s: 2, f: 0 },
                 ]},
             ]);
-            sandbox.window.slopsmithDesktop = {
+            sandbox.window.feedBackDesktop = {
                 isDesktop: true,
                 platform: 'linux',
                 audio: {

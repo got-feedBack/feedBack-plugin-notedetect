@@ -82,7 +82,7 @@ const { createNoteDetector } = loadDetectionCore({
         sb.highway.getSections = () => [];
         sb.highway.getSongInfo = () => ({ tuning: [0, 0, 0, 0, 0, 0], capo: 0 });
         sb.highway.getAvOffset = () => 0;
-        sb.window.slopsmithDesktop = { isDesktop: true, platform: 'linux', audio: audioStub };
+        sb.window.feedBackDesktop = { isDesktop: true, platform: 'linux', audio: audioStub };
     },
 });
 
