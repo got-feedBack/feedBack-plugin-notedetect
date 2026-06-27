@@ -598,10 +598,18 @@ body:has(#v3-upnext) .nd-hud {
 }
 
 /* Song identity under the header — title gives screenshots context, the sub
-   line carries artist · instrument (the track played). */
+   line carries artist · instrument (the track played), and the album-art
+   thumbnail sits to the right of that text. */
 .nd-sum-songmeta {
-    text-align: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.7rem;
     margin: 0.1rem 0 0.5rem;
+}
+.nd-sum-song-text {
+    min-width: 0;            /* lets the title ellipsize inside the flex row */
+    text-align: left;
 }
 .nd-sum-song-title {
     font-family: var(--nd-font-display);
@@ -619,6 +627,15 @@ body:has(#v3-upnext) .nd-hud {
     letter-spacing: 0.14em;
     text-transform: uppercase;
     color: var(--nd-dim);
+}
+.nd-sum-art {
+    flex: 0 0 auto;
+    width: 2.9rem;
+    height: 2.9rem;
+    object-fit: cover;
+    border-radius: calc(var(--nd-radius) * 0.6 + 2px);
+    border: 1px solid var(--nd-frame);
+    box-shadow: var(--nd-bevel);
 }
 
 /* Share row (Copy card / Save) — sits just above the primary actions. */

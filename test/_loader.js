@@ -314,6 +314,7 @@ function loadDetectionCore({ sandboxBeforeRun } = {}) {
         // Results-card share helpers (pure — image/clipboard paths are
         // browser-only and not exposed).
         instrumentLabel: sandbox._ndInstrumentLabel,
+        songArtUrl: sandbox._ndSongArtUrl,
         shareCardText: sandbox._ndShareCardText,
         shareCardFilename: sandbox._ndShareCardFilename,
         createNoteDetector: sandbox.createNoteDetector,

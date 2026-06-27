@@ -662,6 +662,15 @@ function _ndInstrumentLabel(arrangement) {
     return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+// Same-origin album-art URL for a song filename. Mirrors the host's
+// quote(filename, safe='/') so nested DLC paths (a/b.sloppak) resolve, and
+// stays same-origin so the share canvas isn't tainted. '' when no filename.
+// Returns 404 for art-less songs — callers must handle the load failure.
+function _ndSongArtUrl(filename) {
+    if (!filename) return '';
+    return '/api/song/' + String(filename).split('/').map(encodeURIComponent).join('/') + '/art';
+}
+
 // Clipboard text fallback (when image copy + download both fail).
 function _ndShareCardText(data) {
     const d = data || {};
@@ -696,6 +705,20 @@ async function _ndRenderShareCard(data, overlayEl) {
     // One) are document-loaded by the stylesheet; wait so the canvas text
     // matches the on-screen card instead of falling back to a system font.
     try { if (document.fonts && document.fonts.ready) await document.fonts.ready; } catch (e) {}
+
+    // Album art (optional) — same-origin so toBlob() stays untainted. Resolves
+    // null on a 404 (art-less song) or any load error; the card just omits it.
+    let artImg = null;
+    if (d.artUrl) {
+        try {
+            artImg = await new Promise((res) => {
+                const im = new Image();
+                im.onload = () => res(im.naturalWidth ? im : null);
+                im.onerror = () => res(null);
+                im.src = d.artUrl;
+            });
+        } catch (e) { artImg = null; }
+    }
 
     // Resolve the active skin's palette + fonts off the overlay's computed
     // style (it carries data-nd-skin), with the neon defaults as fallback.
@@ -761,6 +784,24 @@ async function _ndRenderShareCard(data, overlayEl) {
         spaced(4); ctx.fillStyle = hit; font(20, fDisp, 700);
         const fcW = ctx.measureText('FULL COMBO').width + 4 * 9;
         ctx.fillText('FULL COMBO', W - P - fcW, 238); spaced(0);
+    }
+
+    // Album art centered in the gap between the title row and the stat strip.
+    if (artImg) {
+        const A = 168, ax = (W - A) / 2, ay = 266, r = 12;
+        ctx.save();
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(ax, ay, A, A, r); else ctx.rect(ax, ay, A, A);
+        ctx.closePath(); ctx.clip();
+        // cover-fit (fill the square, crop the overflow)
+        const iw = artImg.naturalWidth, ih = artImg.naturalHeight;
+        const s = Math.max(A / iw, A / ih), dw = iw * s, dh = ih * s;
+        ctx.drawImage(artImg, ax + (A - dw) / 2, ay + (A - dh) / 2, dw, dh);
+        ctx.restore();
+        ctx.strokeStyle = accent; ctx.lineWidth = 2;
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(ax + 1, ay + 1, A - 2, A - 2, r); else ctx.rect(ax + 1, ay + 1, A - 2, A - 2);
+        ctx.stroke();
     }
 
     // Stat strip across the bottom.
@@ -14748,17 +14789,21 @@ function createNoteDetector(options = {}) {
             ? _summaryInfo.arrangement_index : undefined;
         const retryFilename = _ndShared.currentFilename || '';
         const canRetry = !!retryFilename && typeof window.playSong === 'function';
+        const artUrl = _ndSongArtUrl(retryFilename);
         const shareData = {
-            title: songTitle, artist: songArtist, instrument,
+            title: songTitle, artist: songArtist, instrument, artUrl,
             grade, accuracy, score, hits, misses, bestStreak, maxMultiplier, fullCombo,
         };
         const metaSub = [songArtist, instrument].filter(Boolean).join(' · ');
         const songMetaHtml = (songTitle || metaSub)
-            ? `<div class="nd-sum-songmeta">${
-                songTitle ? `<div class="nd-sum-song-title">${_ndEscapeHtml(songTitle)}</div>` : ''
-              }${
-                metaSub ? `<div class="nd-sum-song-sub">${_ndEscapeHtml(metaSub)}</div>` : ''
-              }</div>`
+            ? `<div class="nd-sum-songmeta">
+                <div class="nd-sum-song-text">${
+                    songTitle ? `<div class="nd-sum-song-title">${_ndEscapeHtml(songTitle)}</div>` : ''
+                }${
+                    metaSub ? `<div class="nd-sum-song-sub">${_ndEscapeHtml(metaSub)}</div>` : ''
+                }</div>${
+                    artUrl ? `<img class="nd-sum-art" alt="" src="${artUrl}">` : ''
+                }</div>`
             : '';
 
         let sectionHtml = '';
@@ -14918,6 +14963,10 @@ function createNoteDetector(options = {}) {
         `;
         const closeBtn = overlay.querySelector('.nd-summary-close');
         if (closeBtn) closeBtn.onclick = () => _ndDismissSummary(true);
+        // Album-art thumbnail: drop it (and collapse the gap) if the song has
+        // no art — the endpoint 404s and we don't want a broken-image glyph.
+        const artImgEl = overlay.querySelector('.nd-sum-art');
+        if (artImgEl) artImgEl.onerror = () => { try { artImgEl.remove(); } catch (e) {} };
         // Copy card / Save — render the share image in the active skin.
         const copyBtn = overlay.querySelector('.nd-summary-copy');
         if (copyBtn) copyBtn.onclick = () => _ndShareCardClick(copyBtn, 'copy', shareData, overlay);

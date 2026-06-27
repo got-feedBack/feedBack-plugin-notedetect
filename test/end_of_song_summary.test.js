@@ -228,3 +228,14 @@ test('_ndShareCardFilename slugs the title and falls back when empty', () => {
     assert.equal(core.shareCardFilename({ title: '' }), 'feedback-score-card.png');
     assert.equal(core.shareCardFilename({}), 'feedback-score-card.png');
 });
+
+test('_ndSongArtUrl builds a same-origin art URL, preserving DLC path slashes', () => {
+    const core = loadDetectionCore();
+    assert.equal(core.songArtUrl('Bon-Iver_Beth-Rest.sloppak'),
+        '/api/song/Bon-Iver_Beth-Rest.sloppak/art');
+    // Nested DLC path: slashes stay as path separators, segments are encoded.
+    assert.equal(core.songArtUrl('diagnostics-builtin/basic guitar.sloppak'),
+        '/api/song/diagnostics-builtin/basic%20guitar.sloppak/art');
+    assert.equal(core.songArtUrl(''), '');
+    assert.equal(core.songArtUrl(null), '');
+});
