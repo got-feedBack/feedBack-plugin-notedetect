@@ -94,8 +94,18 @@
             </span>
         </label>
         <label for="nd-save-dir" class="block text-xs text-gray-300 mb-1">Save folder for cards</label>
-        <input type="text" id="nd-save-dir" placeholder="(default: your Pictures folder)"
-               class="w-full bg-dark-700 border border-gray-600 rounded-lg px-3 py-2 text-sm text-gray-200 focus:ring-accent/40 focus:border-accent">
+        <div class="flex gap-2">
+            <input type="text" id="nd-save-dir" placeholder="(default: your Pictures folder)"
+                   class="flex-1 min-w-0 bg-dark-700 border border-gray-600 rounded-lg px-3 py-2 text-sm text-gray-200 focus:ring-accent/40 focus:border-accent">
+            <!-- Native folder picker — desktop only. The web build has no
+                 bridge, so screen.js keeps this hidden unless
+                 feedBackDesktop.pickDirectory exists; the text field is the
+                 fallback either way. -->
+            <button type="button" id="nd-save-dir-browse"
+                    class="hidden shrink-0 bg-dark-700 border border-gray-600 rounded-lg px-3 py-2 text-sm text-gray-200 hover:border-accent focus:ring-accent/40 focus:border-accent">
+                Browse&hellip;
+            </button>
+        </div>
         <p class="text-[11px] text-gray-500 leading-relaxed mt-1">
             Where the <strong>Save</strong> button (and auto-save, if on) write the PNG. Leave blank to use your Pictures folder (e.g. <code>C:\Users\you\Pictures</code>). Must be an absolute path.
         </p>
@@ -989,13 +999,33 @@
     const saveDirInput = _q('nd-save-dir');
     if (saveDirInput) {
         try { saveDirInput.value = localStorage.getItem('slopsmith_notedetect_save_dir') || ''; } catch (_) {}
-        saveDirInput.onchange = () => {
+        const persistSaveDir = () => {
             try {
                 const v = saveDirInput.value.trim();
                 if (v) localStorage.setItem('slopsmith_notedetect_save_dir', v);
                 else localStorage.removeItem('slopsmith_notedetect_save_dir');
             } catch (_) {}
         };
+        saveDirInput.onchange = persistSaveDir;
+
+        // Browse… opens the desktop shell's native folder picker. Only the
+        // desktop build exposes the bridge (window.feedBackDesktop, or the
+        // legacy slopsmithDesktop alias); in the web testbed it's absent, so
+        // the button stays hidden and typing an absolute path is the only
+        // input. Picking a folder fills the field and persists it the same
+        // way an edit-and-blur would.
+        const browseBtn = _q('nd-save-dir-browse');
+        const desktop = (typeof window !== 'undefined')
+            ? (window.feedBackDesktop || window.slopsmithDesktop) : null;
+        if (browseBtn && desktop && typeof desktop.pickDirectory === 'function') {
+            browseBtn.classList.remove('hidden');
+            browseBtn.onclick = async () => {
+                try {
+                    const dir = await desktop.pickDirectory();
+                    if (dir) { saveDirInput.value = dir; persistSaveDir(); }
+                } catch (_) { /* dialog cancelled / unavailable */ }
+            };
+        }
     }
 
     // Training upload destination — text input that pre-fills with
