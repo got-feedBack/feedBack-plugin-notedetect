@@ -2709,7 +2709,7 @@ function createNoteDetector(options = {}) {
     // while detection is enabled, but the calibration wizard can run earlier in
     // onboarding; fall back to the cached handle.
     function _ndResolveAudioBridge() {
-        const d = (typeof window !== 'undefined') ? window.slopsmithDesktop : null;
+        const d = (typeof window !== 'undefined') ? window.feedBackDesktop : null;
         return (d && d.audio) || _ndBridgeAudio();
     }
     // Set the engine input gain live (bridge setGain('input', …)). Used both to
@@ -6187,7 +6187,12 @@ function createNoteDetector(options = {}) {
     // where the signal step forces the engine to unity, else the current web gain),
     // divided out to recover the raw peak before solving for the target.
     function _calWizardRecommendInputGain(signalStatus, currentGain, signalAvg, signalPeakPct, measuredAtGain) {
-        const measGain = (Number.isFinite(measuredAtGain) && measuredAtGain > 0) ? measuredAtGain : 1;
+        // The measurement basis must be a known positive gain. A null/invalid
+        // value means we couldn't establish it (e.g. on the desktop engine path
+        // the unity-set failed), so DON'T recommend — dividing the peak by an
+        // assumed `1` (or the unrelated web gain) would yield a wrong calibration.
+        if (!(Number.isFinite(measuredAtGain) && measuredAtGain > 0)) return null;
+        const measGain = measuredAtGain;
         const rawPeak = (Number.isFinite(signalPeakPct) ? signalPeakPct / 100 : 0) / measGain;
         if (rawPeak < 0.02) return null;   // no real signal captured — don't recommend
         const target = Math.max(0.1, Math.min(5, CAL_TARGET_PEAK / rawPeak));
@@ -6332,6 +6337,13 @@ function createNoteDetector(options = {}) {
             let extra = '';
             const gRec = _calWizardRecommendInputGain(wiz.signal.status, inputGain, avg, peak, wiz._measuredAtGain);
             if (gRec) extra = `<div class="text-gray-400 mt-1">Suggested input gain: ${gRec.value}x</div>`;
+            // We forced the engine to unity to measure the raw peak. Don't leave it
+            // there — on the engine path, drop it to the just-computed target now, so
+            // whether the user applies (this becomes the calibration) or cancels, the
+            // engine sits at a safe level instead of hot at unity. (No-op without a
+            // recommendation, e.g. no signal captured; the host still re-asserts its
+            // preset gain on the next tone load.)
+            if (gRec && wiz._onEnginePath) _ndSetEngineGain(gRec.value);
             _calWizardSetAutoStatus(
                 `<span class="text-green-300/90">Captured:</span> avg ${avg}% · peak ${peak}% · <span class="font-semibold">${label}</span>${extra}`);
             _calWizardBuildSafeRecommendations(wiz, getCalibrationSnapshot());
@@ -6411,11 +6423,16 @@ function createNoteDetector(options = {}) {
         const noiseFloor = (wiz.noise && wiz.noise.avgPct) || 3;
         const trigger = noiseFloor + 8;
         // Measure at UNITY engine gain so the captured peak is the RAW input (the
-        // engine meter is post-gain). On desktop this forces the engine to 1.0 for
-        // the capture; on the browser path there's no engine bridge, so the peak is
-        // read at the current web gain (`inputGain`) instead. Recorded so the
-        // recommendation can divide it back out and solve for CAL_TARGET_PEAK.
-        wiz._measuredAtGain = _ndSetEngineGain(1.0) ? 1.0 : inputGain;
+        // engine meter is post-gain). Record whether we're on the desktop engine
+        // path so a *failed* unity-set isn't mis-measured against the web gain
+        // (which isn't in the engine signal path). On the engine path: force unity
+        // and record 1.0 (or null if it didn't take → the recommendation bails).
+        // On the browser path: no engine bridge, so the peak reflects the current
+        // web gain (`inputGain`), which the recommendation divides back out.
+        wiz._onEnginePath = !!_ndResolveAudioBridge();
+        wiz._measuredAtGain = wiz._onEnginePath
+            ? (_ndSetEngineGain(1.0) ? 1.0 : null)
+            : inputGain;
         _calWizardBeginCountdownThen('signal', 3, () => {
             _calWizardStopAutoCapture();
             const samples = [];
@@ -7579,10 +7596,11 @@ function createNoteDetector(options = {}) {
         _calWizardStopAllStringsRun('close');
         _calWizardClearPauseRetries();
         _calWizardStopAutoCapture();
-        // The signal step may have forced the engine input gain to unity to measure
-        // the raw peak. On close, re-assert the calibrated value (the just-applied
-        // one, or the prior one if the user cancelled) so we never leave the engine
-        // stuck at unity. No-op if never calibrated (engineInputGain == null).
+        // Re-assert the calibrated engine input gain on close (the just-applied
+        // value, or a prior calibration). The signal step already drops the engine
+        // off unity to the measured target right after capture, so a never-calibrated
+        // cancel isn't left hot here; this is the backstop for an applied/prior value.
+        // No-op when never calibrated (engineInputGain == null).
         _ndApplyEngineGain();
         _calWizardStopTimedPlayAlong('close');
         _calWizardReleaseTuner();
