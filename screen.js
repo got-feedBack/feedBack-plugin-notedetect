@@ -861,6 +861,27 @@ async function _ndRenderShareCard(data, overlayEl) {
             y += rowH;
         }
         ctx.textBaseline = 'alphabetic';
+    } else {
+        // No section data (GP imports / section-less charts): fill the middle
+        // with an accuracy hero so the card doesn't read as half-empty. Same
+        // positive colour band as the section bars (green ≥90%, else amber).
+        const accPct = Math.max(0, Math.min(100, Math.round(Number(d.accuracy) || 0)));
+        const heroColor = accPct >= 90 ? hit : warn;
+        const hitsTotal = (d.hits || 0) + (d.misses || 0);
+        spaced(3); ctx.fillStyle = dim; font(15, fDisp, 600);
+        ctx.fillText('ACCURACY', P, 252); spaced(0);
+        glowSet(heroColor); ctx.fillStyle = text; font(116, fDisp, 800);
+        ctx.fillText(accPct + '%', P, 372); glowClear();
+        spaced(2); ctx.fillStyle = dim; font(20, fDisp, 600);
+        ctx.fillText((d.hits || 0) + ' / ' + hitsTotal + ' NOTES HIT', P, 410); spaced(0);
+        const mX = P, mW = W - P * 2, mY = 446, mH = 18;
+        ctx.fillStyle = 'rgba(255,255,255,0.10)';                       // track
+        if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(mX, mY, mW, mH, mH / 2); ctx.fill(); }
+        else ctx.fillRect(mX, mY, mW, mH);
+        ctx.fillStyle = heroColor;                                      // fill
+        const mFw = Math.max(mH, mW * accPct / 100);
+        if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(mX, mY, mFw, mH, mH / 2); ctx.fill(); }
+        else ctx.fillRect(mX, mY, mFw, mH);
     }
 
     // Stat strip across the bottom — note counts as fractions of judged total.
@@ -881,8 +902,16 @@ async function _ndRenderShareCard(data, overlayEl) {
         const col = st.color || text;
         spaced(2); ctx.fillStyle = dim; font(15, fDisp, 600);
         ctx.fillText(String(st.label || '').toUpperCase(), x, sy); spaced(0);
-        glowSet(col); ctx.fillStyle = col; font(36, fDisp, 700);
-        ctx.fillText(fit(String(st.value == null ? '' : st.value), colW - 14), x, sy + 46); glowClear();
+        // Auto-shrink the value font so wide values (3-digit hit counts like
+        // "280/388", a long section name) fit the column instead of being
+        // ellipsised to "280/3…"; short values keep the full 36px.
+        const valStr = String(st.value == null ? '' : st.value);
+        const valMaxW = colW - 14;
+        let valPx = 36;
+        font(valPx, fDisp, 700);
+        while (valPx > 22 && ctx.measureText(valStr).width > valMaxW) { valPx -= 2; font(valPx, fDisp, 700); }
+        glowSet(col); ctx.fillStyle = col;
+        ctx.fillText(fit(valStr, valMaxW), x, sy + 46); glowClear();
     });
 
     // Footer brand (overridable for a consuming plugin).
