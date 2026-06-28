@@ -291,7 +291,7 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // exact build that produced it. The script tag has no `import`/`fetch`
 // hook to read package.json at load time, so this is the single
 // hand-maintained constant the diagnostic path keys off of.
-const _ND_VERSION = '1.19.0';
+const _ND_VERSION = '1.20.0';
 
 // Audio processing constants
 const _ND_MIN_YIN_SAMPLES = 4096;  // enough for low E at 48kHz (need tau=585, halfLen=2048)
@@ -685,6 +685,13 @@ function _ndSaveDir() {
     catch (e) { return ''; }
 }
 
+// Auto-save a results card to disk after every (scored) song? Opt-in, default
+// OFF. The song-end summary reads this; settings.html writes the key.
+function _ndAutoSaveEnabled() {
+    try { return localStorage.getItem('slopsmith_notedetect_autosave_card') === '1'; }
+    catch (e) { return false; }
+}
+
 // Transient skin-themed toast (used for "Saved to …"). Self-removing.
 function _ndToast(message, ms) {
     if (typeof document === 'undefined' || !document.body) return;
@@ -723,6 +730,24 @@ function _ndShareCardFilename(data) {
         .replace(/^-+|-+$/g, '')
         .slice(0, 48) || 'score-card';
     return `feedback-${base}.png`;
+}
+
+// Auto-save filename: "Artist - Title - YYYY-MM-DD HHMM.png" so a folder of
+// cards sorts by song and every take is kept (the server never overwrites an
+// auto-saved card — it appends a counter on a clash). Artist is omitted when
+// unknown. The server sanitises the name (spaces survive) and de-dupes.
+function _ndAutoSaveFilename(data) {
+    const d = data || {};
+    const now = new Date();
+    const p2 = (n) => String(n).padStart(2, '0');
+    const stamp = now.getFullYear() + '-' + p2(now.getMonth() + 1) + '-' + p2(now.getDate())
+        + ' ' + p2(now.getHours()) + p2(now.getMinutes());
+    // Turn any path separators into hyphens up front so the server's basename
+    // guard doesn't drop the part before a slash (e.g. artist "AC/DC").
+    const clean = (s) => String(s == null ? '' : s).replace(/[\\/]/g, '-').trim();
+    const title = clean(d.title) || 'Song';
+    const artist = clean(d.artist);
+    return (artist ? artist + ' - ' + title : title) + ' - ' + stamp + '.png';
 }
 
 // Render the results into a 1200×630 canvas using the live skin. Returns the
@@ -934,15 +959,18 @@ async function _ndShareCardAction(data, action, overlayEl) {
 // Pictures folder) and returns the absolute path. Falls back to a normal
 // browser download if the backend route isn't reachable. Returns
 // { ok, path?, dir?, filename?, fallback? }.
-async function _ndSaveCard(data, overlayEl) {
+async function _ndSaveCard(data, overlayEl, opts) {
+    const auto = !!(opts && opts.auto);
     const cv = await _ndRenderShareCard(data, overlayEl);
     if (!cv || !cv.toBlob) return { ok: false };
     const blob = await new Promise((r) => cv.toBlob(r, 'image/png'));
     if (!blob) return { ok: false };
-    const name = _ndShareCardFilename(data);
+    const name = auto ? _ndAutoSaveFilename(data) : _ndShareCardFilename(data);
     const dir = _ndSaveDir();
     try {
-        const qs = '?name=' + encodeURIComponent(name) + (dir ? '&dir=' + encodeURIComponent(dir) : '');
+        const qs = '?name=' + encodeURIComponent(name)
+            + (dir ? '&dir=' + encodeURIComponent(dir) : '')
+            + (auto ? '&auto=1' : '');
         const resp = await fetch('/api/plugins/note_detect/save-card' + qs, {
             method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob,
         });
@@ -950,7 +978,11 @@ async function _ndSaveCard(data, overlayEl) {
             const j = await resp.json().catch(() => null);
             if (j && j.ok) return { ok: true, path: j.path, dir: j.dir, filename: j.filename };
         }
-    } catch (e) { /* fall through to browser download */ }
+    } catch (e) { /* fall through */ }
+    // Auto-save is silent: never spew a browser download per song when the
+    // server route is unavailable — just report failure. The manual Save button
+    // keeps the download fallback below.
+    if (auto) return { ok: false };
     // Fallback: browser download (server route unavailable).
     try {
         const url = URL.createObjectURL(blob);
@@ -12340,7 +12372,7 @@ function createNoteDetector(options = {}) {
         try {
             // claimAutoExit: this is the natural song-end summary, so it owns
             // the host's post-song return (see showSummary / _ndDismissSummary).
-            const built = showSummary({ startHidden: _recArmedForTraining, claimAutoExit: true });
+            const built = showSummary({ startHidden: _recArmedForTraining, claimAutoExit: true, autoSave: _ndAutoSaveEnabled() });
             // Only mark deferred when an overlay was actually built and
             // hidden — a <5-judgment take builds nothing, so there'd be
             // nothing for _runDeferredSummary() to reveal.
@@ -14962,6 +14994,15 @@ function createNoteDetector(options = {}) {
             accuracy, score, hits, misses, bestStreak, maxMultiplier, fullCombo,
             sections: shareSections, extraLabel, extraValue,
         };
+        // Auto-save the card to disk if the user opted in. Only the natural
+        // song-end path passes autoSave (api.showSummary() / manual shows do
+        // not), so this fires once per completed song. Fire-and-forget + silent
+        // — the summary overlay is already on screen, the PNG lands in the
+        // configured (or default "feedBack Cards") folder, and the server keeps
+        // every take. instanceRoot carries data-nd-skin so the card themes right.
+        if (opts && opts.autoSave) {
+            try { _ndSaveCard(shareData, instanceRoot, { auto: true }); } catch (e) {}
+        }
         const metaSub = [songArtist, instrument].filter(Boolean).join(' · ');
         const songMetaHtml = (songTitle || metaSub)
             ? `<div class="nd-sum-songmeta">

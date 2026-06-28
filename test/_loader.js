@@ -317,6 +317,7 @@ function loadDetectionCore({ sandboxBeforeRun } = {}) {
         songArtUrl: sandbox._ndSongArtUrl,
         shareCardText: sandbox._ndShareCardText,
         shareCardFilename: sandbox._ndShareCardFilename,
+        autoSaveFilename: sandbox._ndAutoSaveFilename,
         createNoteDetector: sandbox.createNoteDetector,
         // Drill-mode tests: expose the slopsmith stub so tests can
         // drive synthetic `loop:restart` etc. and toggle the loop

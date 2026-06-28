@@ -157,7 +157,11 @@ _LIVE_FILE_MAX_BYTES = 8 * 1024 * 1024
 # 1200×630 card is ~100 KB; 16 MB is absurd headroom while refusing a
 # pathological blob.
 _CARD_MAX_BYTES = 16 * 1024 * 1024
-_CARD_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+# Allow spaces + a few human-friendly punctuation marks in a saved card name
+# (e.g. "Artist - Title - 2026-06-28 1432.png"); everything else collapses to a
+# hyphen. Path separators never survive — Path(...).name strips them first — so
+# a name can't escape the target directory.
+_CARD_NAME_RE = re.compile(r"[^A-Za-z0-9 ._&(),'-]+")
 
 
 def _default_pictures_dir() -> Path:
@@ -166,14 +170,18 @@ def _default_pictures_dir() -> Path:
     return Path.home() / "Pictures"
 
 
-def _resolve_card_dir(raw: str) -> Path:
+def _resolve_card_dir(raw: str, auto: bool = False) -> Path:
     """Target directory for a saved card: the user-configured folder
-    (settings) when given, else the default Pictures folder. A supplied
-    path must be absolute — a relative path would resolve against the
-    server's CWD, not anywhere the user expects."""
+    (settings) when given, else the default Pictures folder. For an
+    auto-saved card with no configured folder, default to a dedicated
+    "feedBack Cards" subfolder of Pictures so the steady stream of per-song
+    cards doesn't clutter the Pictures root. A supplied path must be
+    absolute — a relative path would resolve against the server's CWD, not
+    anywhere the user expects."""
     raw = (raw or "").strip()
     if not raw:
-        return _default_pictures_dir()
+        base = _default_pictures_dir()
+        return base / "feedBack Cards" if auto else base
     p = Path(raw).expanduser()
     if not p.is_absolute():
         raise HTTPException(400, "save folder must be an absolute path")
@@ -184,10 +192,11 @@ def _sanitize_card_filename(name: str) -> str:
     # Reduce to a bare, filesystem-safe .png basename — never a path, so a
     # client can't write outside the resolved directory via the name.
     base = Path(str(name or "")).name
-    base = _CARD_NAME_RE.sub("-", base).strip("-_.") or "score-card"
+    base = _CARD_NAME_RE.sub("-", base)
+    base = re.sub(r"\s+", " ", base).strip(" -_.") or "score-card"
     if not base.lower().endswith(".png"):
         base = re.sub(r"\.[^.]*$", "", base) + ".png"
-    return base[:80]
+    return base[:120]
 
 
 def _parse_pcloud_code(upload_url: str | None) -> str | None:
@@ -676,11 +685,20 @@ def setup(app, context):
         body = await _read_capped_body(request, _CARD_MAX_BYTES)
         if not body or body[:8] != b"\x89PNG\r\n\x1a\n":
             raise HTTPException(400, "body is not a PNG image")
-        target = _resolve_card_dir(request.query_params.get("dir", ""))
+        auto = request.query_params.get("auto", "") in ("1", "true", "yes")
+        target = _resolve_card_dir(request.query_params.get("dir", ""), auto=auto)
         name = _sanitize_card_filename(request.query_params.get("name", "score-card.png"))
         try:
             target.mkdir(parents=True, exist_ok=True)
             path = target / name
+            # Auto-save preserves every take: never overwrite an existing card —
+            # append " (2)", " (3)", … on a name clash (same song, same minute).
+            if auto and path.exists():
+                stem, suffix = path.stem, path.suffix
+                i = 2
+                while (target / f"{stem} ({i}){suffix}").exists():
+                    i += 1
+                path = target / f"{stem} ({i}){suffix}"
             tmp = path.with_suffix(path.suffix + ".tmp")
             tmp.write_bytes(body)
             tmp.replace(path)
@@ -691,7 +709,7 @@ def setup(app, context):
             "ok": True,
             "path": str(path),
             "dir": str(target),
-            "filename": name,
+            "filename": path.name,
             "bytes": len(body),
         }
 
