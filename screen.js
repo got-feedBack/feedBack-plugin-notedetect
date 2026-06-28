@@ -5970,6 +5970,10 @@ function createNoteDetector(options = {}) {
         wiz.autoCapture = { kind, phase: 'countdown', left };
         const tick = () => {
             if (!_calWizardState || _calWizardState !== wiz) return;
+            // Keep the live counter on autoCapture so the per-string row cells
+            // (rendered by _calWizardRefreshLive) can show the same countdown
+            // inline, next to the Check button the user just pressed.
+            if (wiz.autoCapture) wiz.autoCapture.left = left;
             _calWizardSetAutoStatus(`<span class="text-cyan-300/90">Get ready…</span> <span class="text-2xl font-bold text-white">${left}</span>`);
             if (left <= 0) {
                 _calWizardStopAutoCapture();
@@ -6195,6 +6199,45 @@ function createNoteDetector(options = {}) {
         return all.find((n) => n.id === noteId) || null;
     }
 
+    // The open strings shown (and run) in the advanced panel: every open string
+    // EXCEPT the ones the quick Open low / Open 2nd checks above already cover.
+    // Shared by the render and the Run-All sweep so the run only ever targets
+    // strings that have a visible row (with its own inline countdown/result).
+    function _calWizardResolveAdvancedStringChecks() {
+        const quickStrings = new Set(_calWizardResolveNoteChecks({ mode: 'quick' }).map((s) => s.string));
+        return _calWizardResolveNoteChecks({ mode: 'all' }).filter((s) => !quickStrings.has(s.string));
+    }
+
+    // Result-cell colour + text for one open-string check, shared by the static
+    // render and the live per-row refresh so a row reads the same either way.
+    function _calWizardNoteResultParts(spec) {
+        const wiz = _calWizardState;
+        const r = wiz && wiz.notes ? wiz.notes[spec.id] : null;
+        if (r && r.ok) {
+            return { cls: 'text-green-300/90', txt: `OK — heard ${r.heardNote} (${r.confidencePct}%)` };
+        }
+        if (r) {
+            return { cls: 'text-amber-200/90', txt: `Failed — expected ${r.expectedNote || spec.expectedNote}` };
+        }
+        return { cls: 'text-gray-500', txt: `Expected ${spec.expectedNote}` };
+    }
+
+    // The open-string check (if any) currently counting down or listening, so
+    // its inline row cell shows live status instead of the stored result. The
+    // countdown autoCapture encodes the note id in `kind` ("note_<id>"); the
+    // listening autoCapture carries it on `noteId`.
+    function _calWizardActiveNoteCapture() {
+        const ac = _calWizardState && _calWizardState.autoCapture;
+        if (!ac) return null;
+        if (ac.phase === 'countdown' && typeof ac.kind === 'string' && ac.kind.startsWith('note_')) {
+            return { id: ac.kind.slice(5), phase: 'countdown', left: Number.isFinite(ac.left) ? ac.left : '' };
+        }
+        if (ac.kind === 'note' && ac.noteId) {
+            return { id: ac.noteId, phase: 'listening' };
+        }
+        return null;
+    }
+
     // Wizard-only raw pitch readout — bypasses chart-aware detectedDisplayMidi.
     function _calWizardRawPitchFields() {
         const confOk = detectedConfidence > detectionConfidenceMin;
@@ -6247,7 +6290,10 @@ function createNoteDetector(options = {}) {
             return;
         }
         _calWizardStopAllStringsRun('restart', { clearMessage: true });
-        const specs = _calWizardResolveNoteChecks({ mode: 'all' });
+        // Sweep only the advanced rows (the two lowest strings are covered by
+        // the quick Open low / Open 2nd checks) so every run target has a
+        // visible row to show its countdown/result.
+        const specs = _calWizardResolveAdvancedStringChecks();
         if (!specs.length) return;
         for (const key of Object.keys(wiz.notes)) {
             if (key.startsWith('openS')) delete wiz.notes[key];
@@ -6287,8 +6333,8 @@ function createNoteDetector(options = {}) {
         if (seq.index >= seq.ids.length) {
             seq.running = false;
             seq.complete = true;
-            seq.message = 'All open strings passed.';
-            _calWizardSetAutoStatus('<span class="text-green-300/90">All open strings passed.</span>');
+            seq.message = 'Remaining strings passed.';
+            _calWizardSetAutoStatus('<span class="text-green-300/90">Remaining strings passed.</span>');
             renderCalibrationWizard();
             return true;
         }
@@ -7263,6 +7309,29 @@ function createNoteDetector(options = {}) {
                 debugEl.classList.add('hidden');
             }
         }
+        if (wiz.step === 5) {
+            const rowCells = _calWizardEl.querySelectorAll('.nd-cal-all-row-result');
+            if (rowCells.length) {
+                const active = _calWizardActiveNoteCapture();
+                const byId = {};
+                _calWizardResolveNoteChecks({ mode: 'all' }).forEach((s) => { byId[s.id] = s; });
+                rowCells.forEach((cell) => {
+                    const id = cell.getAttribute('data-note-result');
+                    if (active && active.id === id) {
+                        cell.className = 'nd-cal-all-row-result text-cyan-300/90 text-[10px] text-right shrink-0';
+                        cell.innerHTML = active.phase === 'countdown'
+                            ? `Get ready… <strong class="text-white">${active.left}</strong>`
+                            : 'Listening…';
+                        return;
+                    }
+                    const spec = byId[id];
+                    if (!spec) return;
+                    const res = _calWizardNoteResultParts(spec);
+                    cell.className = `nd-cal-all-row-result ${res.cls} text-[10px] text-right shrink-0`;
+                    cell.textContent = res.txt;
+                });
+            }
+        }
         const medEl = _calWizardEl.querySelector('.nd-cal-timing-median');
         if (medEl) {
             const t = wiz.timing;
@@ -7434,7 +7503,6 @@ function createNoteDetector(options = {}) {
                 <p class="text-[10px] text-gray-500">If <strong>Too low</strong>: raise interface gain or play closer to the mic/DI. If <strong>Too hot</strong>: lower gain to avoid clipping.</p>`;
         } else if (step === 5) {
             const noteSpecs = _calWizardResolveNoteChecks({ mode: 'quick' });
-            const allNoteSpecs = _calWizardResolveNoteChecks({ mode: 'all' });
             // Standalone (no song): let the player pick their instrument so the
             // open-string targets cover 5/6-string bass and 7/8-string guitar.
             const _calCtx = _calWizardResolveNoteCheckContext();
@@ -7454,28 +7522,40 @@ function createNoteDetector(options = {}) {
             const allRunning = !!allStr.running;
             const detailsOpen = !!(allStr.detailsOpen || allStr.running || allStr.complete || allStr.failedId);
             const noteRowHtml = (spec, compact) => {
-                const r = wiz.notes[spec.id];
-                const st = r && r.ok ? 'text-green-300/90' : r ? 'text-amber-200/90' : 'text-gray-500';
-                const txt = r && r.ok
-                    ? `OK — heard ${r.heardNote} (${r.confidencePct}%)`
-                    : r
-                        ? `Failed — expected ${r.expectedNote || spec.expectedNote}`
-                        : `Expected ${spec.expectedNote}`;
+                const res = _calWizardNoteResultParts(spec);
                 const labelCls = compact ? 'text-[10px]' : 'text-xs';
                 return `<div class="flex justify-between py-1 border-b border-gray-700/50 gap-2">
                     <span class="text-gray-300 ${labelCls}">${spec.label}</span>
-                    <span class="${st} text-[10px] text-right shrink-0">${txt}</span></div>`;
+                    <span class="${res.cls} text-[10px] text-right shrink-0">${res.txt}</span></div>`;
             };
             const noteRows = noteSpecs.map((spec) => noteRowHtml(spec, false)).join('');
             const noteButtons = noteSpecs.map((spec) =>
                 `<button type="button" class="nd-cal-check-note w-full py-2 bg-dark-600 hover:bg-dark-500 rounded text-xs text-gray-200 mb-1" data-note="${spec.id}">Check ${spec.label}</button>`
             ).join('');
-            const allRows = allNoteSpecs.map((spec) => noteRowHtml(spec, true)).join('');
             const allBtnDisabled = allRunning ? ' disabled' : '';
             const allBtnDisabledCls = allRunning ? ' opacity-50 cursor-not-allowed' : '';
-            const allButtons = allNoteSpecs.map((spec) => {
-                const n = spec.displayString != null ? spec.displayString : (spec.string + 1);
-                return `<button type="button" class="nd-cal-check-note-all w-full py-1.5 bg-dark-600 hover:bg-dark-500 rounded text-[10px] text-gray-200 mb-1${allBtnDisabledCls}" data-note="${spec.id}"${allBtnDisabled}>Check String ${n}</button>`;
+            // Per-string manual checks: skip the strings the quick Open low / Open
+            // 2nd checks above already cover — they were redundant (tester
+            // feedback). Each remaining string is one compact row: Check button +
+            // label + an inline result/countdown cell so the status is never
+            // scrolled off the bottom (kept live by _calWizardRefreshLive). Run-All
+            // sweeps this same set, so every run target has a visible row.
+            const advancedSpecs = _calWizardResolveAdvancedStringChecks();
+            const active = _calWizardActiveNoteCapture();
+            const allRows = advancedSpecs.map((spec) => {
+                let res;
+                if (active && active.id === spec.id) {
+                    res = active.phase === 'countdown'
+                        ? { cls: 'text-cyan-300/90', txt: `Get ready… ${active.left}` }
+                        : { cls: 'text-cyan-300/90', txt: 'Listening…' };
+                } else {
+                    res = _calWizardNoteResultParts(spec);
+                }
+                return `<div class="flex items-center gap-2 py-1 border-b border-gray-700/50">
+                    <button type="button" class="nd-cal-check-note-all shrink-0 px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded text-[10px] text-gray-200${allBtnDisabledCls}" data-note="${spec.id}"${allBtnDisabled}>Check</button>
+                    <span class="text-gray-300 text-[10px] flex-1 min-w-0">${spec.label}</span>
+                    <span class="nd-cal-all-row-result ${res.cls} text-[10px] text-right shrink-0" data-note-result="${spec.id}">${res.txt}</span>
+                </div>`;
             }).join('');
             let seqStatusHtml = '';
             if (allStr.message) {
@@ -7486,7 +7566,7 @@ function createNoteDetector(options = {}) {
                         : 'text-cyan-300/90';
                 seqStatusHtml = `<p class="text-[10px] ${seqCls} mb-2">${allStr.message}</p>`;
             }
-            const runBtnLabel = allRunning ? 'Checking…' : 'Run All-Strings Check';
+            const runBtnLabel = allRunning ? 'Checking…' : 'Check All Remaining Strings';
             const runBtnDisabled = allRunning ? ' disabled' : '';
             const runBtnCls = allRunning ? ' opacity-60 cursor-not-allowed' : '';
             html = `
@@ -7501,12 +7581,11 @@ function createNoteDetector(options = {}) {
                 <div class="mb-2">${noteRows}</div>
                 ${noteButtons}
                 <details class="nd-cal-all-strings mt-3 mb-2"${detailsOpen ? ' open' : ''}>
-                    <summary class="text-sm text-gray-400 cursor-pointer hover:text-gray-200 py-1 select-none">Check all open strings (advanced)</summary>
-                    <p class="text-[10px] text-gray-500 mt-2 mb-2">Optional — verify every open string against song tuning. Not required to continue.</p>
+                    <summary class="text-sm text-gray-400 cursor-pointer hover:text-gray-200 py-1 select-none">Check remaining strings (advanced)</summary>
+                    <p class="text-[10px] text-gray-500 mt-2 mb-2">Optional — verify the remaining open strings against song tuning. The two lowest are covered by the Open low / Open 2nd checks above. Not required to continue.</p>
                     <button type="button" class="nd-cal-run-all-strings w-full py-2 bg-accent hover:bg-accent-light rounded-lg text-xs font-semibold text-white mb-2${runBtnCls}"${runBtnDisabled}>${runBtnLabel}</button>
                     ${seqStatusHtml}
                     <div class="mb-2">${allRows}</div>
-                    ${allButtons}
                 </details>
                 <p class="text-[10px] text-gray-500">If a check fails: retune, confirm the right input channel, raise gain slightly, and try the other channel (dry vs wet).</p>`;
         } else if (step === 6) {
@@ -7517,7 +7596,7 @@ function createNoteDetector(options = {}) {
             const playAlongBusy = !!(wiz.playAlong);
             html = `
                 ${_calWizardDetectBanner(snap)}
-                <p class="text-gray-300 text-xs mb-2"><strong class="text-gray-200">Play part of a song</strong> with Detect on so hits are scored. The wizard minimizes automatically so the song is playable — tap <strong>Return to Calibration Wizard</strong> to come back, or <strong>Start Timed Play-Along Test</strong> for a clean ${_CAL_WIZARD_TIMED_PLAYALONG_SEC}s sample window.</p>
+                <p class="text-gray-300 text-xs mb-2"><strong class="text-gray-200">Play part of a song</strong> with Detect on so hits are scored. Tap <strong>Minimize Wizard — Play Song</strong> to reach the song highway (then <strong>Return to Calibration Wizard</strong> to come back), or <strong>Start Timed Play-Along Test</strong> for a clean ${_CAL_WIZARD_TIMED_PLAYALONG_SEC}s sample window.</p>
                 <p class="text-[10px] text-gray-500 mb-2">Use the speed you normally practice. This measures input vs chart alignment, not tempo.</p>
                 <div class="nd-cal-timing-median text-gray-300 text-xs mb-2">Your average timing vs chart: —</div>
                 <p class="text-[10px] text-gray-500 mb-2">Live session: ${Number.isFinite(liveMed) ? _ndFormatMs(liveMed) + ' average' : 'not enough hits yet'} · ${liveN} hit samples</p>
@@ -7700,20 +7779,22 @@ function createNoteDetector(options = {}) {
         if (step >= 1 && step <= 6) _calWizardRefreshLive();
 
         // One-shot, per-step-entry reveal of the surface that lives *behind*
-        // this modal (tester feedback: clicking the Tuner panel / the song
-        // highway did nothing because the wizard overlay covers them). On
-        // entering the Tuner step, open the tuner (it minimizes the wizard); on
-        // entering the Timing step, minimize so the highway is clickable. The
-        // guard is set BEFORE firing so the re-render these trigger can't
-        // recurse, and a step that didn't change (e.g. returning from the tuner)
-        // never re-fires.
+        // this modal (tester feedback: clicking the Tuner panel did nothing
+        // because the wizard overlay covers it). On entering the Tuner step,
+        // open the tuner (it minimizes the wizard). The guard is set BEFORE
+        // firing so the re-render this triggers can't recurse, and a step that
+        // didn't change (e.g. returning from the tuner) never re-fires.
+        //
+        // The Timing step does NOT auto-minimize: a later tester reported the
+        // step "does not load" because the card vanished the instant they
+        // reached it. The step keeps explicit "Minimize Wizard — Play Song" and
+        // "Start Timed Play-Along Test" buttons (both minimize on click) so the
+        // highway is still reachable on demand.
         const enteredStep = wiz._autoEnterStep !== step;
         wiz._autoEnterStep = step;
         if (enteredStep && !wiz.complete && !wiz.tunerMinimized) {
             if (step === 2) {
                 _calWizardOpenTunerFromWizard();
-            } else if (step === 6) {
-                _calWizardMinimizeForPlayback();
             }
         }
     }
