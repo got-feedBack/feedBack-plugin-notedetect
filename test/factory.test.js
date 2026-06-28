@@ -16,10 +16,22 @@ const { createNoteDetector } = loadDetectionCore();
 
 test('createNoteDetector returns the documented API surface', () => {
     const det = createNoteDetector();
-    const expected = ['enable', 'disable', 'destroy', 'isEnabled', 'getStats', 'setChannel', 'injectButton', 'showSummary'];
+    const expected = ['enable', 'disable', 'destroy', 'isEnabled', 'getInputLevel', 'getStats', 'setChannel', 'injectButton', 'showSummary'];
     for (const name of expected) {
         assert.equal(typeof det[name], 'function', `missing method: ${name}`);
     }
+    det.destroy();
+});
+
+test('getInputLevel() returns a {level, peak} pair, zeroed before any capture', () => {
+    // Backs the host onboarding "we can hear you" meter — must read the same
+    // signal the scorer sees and be safe to poll before detection is enabled.
+    const det = createNoteDetector();
+    const lvl = det.getInputLevel();
+    assert.equal(typeof lvl.level, 'number');
+    assert.equal(typeof lvl.peak, 'number');
+    assert.equal(lvl.level, 0);
+    assert.equal(lvl.peak, 0);
     det.destroy();
 });
 

@@ -291,7 +291,7 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // exact build that produced it. The script tag has no `import`/`fetch`
 // hook to read package.json at load time, so this is the single
 // hand-maintained constant the diagnostic path keys off of.
-const _ND_VERSION = '1.21.0';
+const _ND_VERSION = '1.22.0';
 
 // Audio processing constants
 const _ND_MIN_YIN_SAMPLES = 4096;  // enough for low E at 48kHz (need tau=585, halfLen=2048)
@@ -15676,6 +15676,15 @@ function createNoteDetector(options = {}) {
         disable,
         destroy,
         isEnabled: () => enabled,
+        // Live input level off the currently-bound capture stream, 0..1, for a
+        // host "we can hear you" meter (the onboarding input-setup gate). This is
+        // the SAME signal the scorer sees: `inputLevel`/`inputPeak` are written by
+        // the always-on level meter (startLevelMeter rAF on web, startBridgeLevelMeter
+        // on desktop), so a meter built on it can't green-light a device the scorer
+        // isn't actually hearing. Only meaningful while detection is enabled (the
+        // meter loop only runs then); reads 0 otherwise. No capture is started here —
+        // the caller enables/disables detection to own that lifecycle.
+        getInputLevel: () => ({ level: Number(inputLevel) || 0, peak: Number(inputPeak) || 0 }),
         // Register (or clear, with null) a note set to verify against the live
         // audio every frame, independent of the chart playhead. Emits
         // notedetect:verify { isHit, score, ... } on a hit. Lets a frozen-
