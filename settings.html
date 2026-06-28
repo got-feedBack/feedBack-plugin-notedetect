@@ -83,11 +83,21 @@
                 </span>
             </span>
         </label>
-        <label for="nd-save-dir" class="block text-xs text-gray-300 mb-1">Save folder for shared cards</label>
+        <label class="flex items-start gap-3 cursor-pointer select-none mb-4">
+            <input type="checkbox" id="nd-autosave-card"
+                   class="mt-0.5 rounded border-gray-600 bg-dark-700 text-accent focus:ring-accent/40">
+            <span class="text-sm text-gray-300">
+                Auto-save a card after every song
+                <span class="block text-[11px] text-gray-500 leading-relaxed mt-1">
+                    Off by default. When on, a results-card PNG is saved automatically each time you finish a song &mdash; named <code>Artist - Title - date.png</code> so takes sort by song and every run is kept (nothing is overwritten). Saved to the folder below; blank &rarr; a <code>feedBack Cards</code> folder in your Pictures.
+                </span>
+            </span>
+        </label>
+        <label for="nd-save-dir" class="block text-xs text-gray-300 mb-1">Save folder for cards</label>
         <input type="text" id="nd-save-dir" placeholder="(default: your Pictures folder)"
                class="w-full bg-dark-700 border border-gray-600 rounded-lg px-3 py-2 text-sm text-gray-200 focus:ring-accent/40 focus:border-accent">
         <p class="text-[11px] text-gray-500 leading-relaxed mt-1">
-            Where the <strong>Save</strong> button on the results card writes the PNG. Leave blank to use your Pictures folder (e.g. <code>C:\Users\you\Pictures</code>). Must be an absolute path.
+            Where the <strong>Save</strong> button (and auto-save, if on) write the PNG. Leave blank to use your Pictures folder (e.g. <code>C:\Users\you\Pictures</code>). Must be an absolute path.
         </p>
     </div>
 
@@ -964,7 +974,17 @@
         };
     }
 
-    // Save folder for shared cards — blank means "use the server default"
+    // Auto-save a card after every song (opt-in, default OFF) — a standalone
+    // key the song-end summary reads. Reuses the save folder below.
+    const autoSaveCb = _q('nd-autosave-card');
+    if (autoSaveCb) {
+        try { autoSaveCb.checked = localStorage.getItem('slopsmith_notedetect_autosave_card') === '1'; } catch (_) {}
+        autoSaveCb.onchange = () => {
+            try { localStorage.setItem('slopsmith_notedetect_autosave_card', autoSaveCb.checked ? '1' : '0'); } catch (_) {}
+        };
+    }
+
+    // Save folder for cards — blank means "use the server default"
     // (the user's Pictures folder), keeping the resolution server-side.
     const saveDirInput = _q('nd-save-dir');
     if (saveDirInput) {
