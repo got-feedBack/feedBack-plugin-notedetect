@@ -9,6 +9,8 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { loadDetectionCore } = require('./_loader');
 
 test('_bindEndOfSongEvents() adds a song:ended listener on top of drill\'s', () => {
@@ -261,4 +263,20 @@ test('renderResultsCard degrades to null with no 2D canvas (headless), no throw'
     await assert.doesNotReject(() => det.copyResultsCard({}));
     await assert.doesNotReject(() => det.saveResultsCard({}));
     det.destroy();
+});
+
+// ── Results card: no backdrop-click dismiss (feedBack issue) ─────────────────
+// The end-of-song results overlay is a terminal "choose your next action"
+// screen — a stray click on the dim backdrop must NOT leave the song. The
+// overlay DOM isn't rendered in the vm sandbox (querySelector → null, see the
+// auto-exit note above), so this is a source-level guard that the
+// backdrop-dismiss handler isn't reintroduced. Exit stays explicit: the
+// Exit Song / Retry / Return to Previous buttons.
+test('results overlay does not dismiss/leave the song on a backdrop click', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'screen.js'), 'utf8');
+    assert.doesNotMatch(
+        src,
+        /overlay\.onclick\s*=[^\n]*_ndDismissSummary/,
+        'the results overlay must not leave the song on a backdrop misclick',
+    );
 });

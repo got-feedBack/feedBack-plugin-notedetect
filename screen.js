@@ -291,7 +291,7 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // exact build that produced it. The script tag has no `import`/`fetch`
 // hook to read package.json at load time, so this is the single
 // hand-maintained constant the diagnostic path keys off of.
-const _ND_VERSION = '1.19.0';
+const _ND_VERSION = '1.19.1';
 
 // Audio processing constants
 const _ND_MIN_YIN_SAMPLES = 4096;  // enough for low E at 48kHz (need tau=585, halfLen=2048)
@@ -15101,7 +15101,13 @@ function createNoteDetector(options = {}) {
             _ndAutoExitRelease = null;
             if (release && navigateHome) { try { release(); } catch (e) {} }
         };
-        overlay.onclick = (e) => { if (e.target === overlay) _ndDismissSummary(true); };
+        // The results card is a terminal "choose your next action" screen, not a
+        // throwaway popover: a stray click on the dim backdrop must NOT leave the
+        // song (feedBack — "clicking outside of the card leaves the song"). Exit
+        // is only via the explicit Exit Song / Retry / Return to Previous buttons.
+        // The overlay still swallows backdrop clicks (pointer-events:auto set
+        // above) so they don't reach the highway behind it; it just no longer
+        // dismisses on a misclick.
         // .nd-sum-shell wraps the (scrollable) panel so the hand-drawn frame
         // overlay (.nd-sum-frame) can sit absolutely over the panel's edges
         // without scrolling with the content.
