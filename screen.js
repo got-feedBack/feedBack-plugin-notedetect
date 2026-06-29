@@ -239,6 +239,31 @@ if (!_ndShared.diagnosticReturn) {
 // they're the same objects as `window.__ndShared.*`.
 const _ndInstances = _ndShared.instances;
 
+// ── ML note-detection gate (cross-instance, refcounted) ────────────────────
+// The desktop engine's polyphonic ML detector (Basic Pitch) defaults OFF and
+// is the most expensive thing in the audio engine. On the default desktop path
+// scoring runs through the harmonic-comb engine NoteVerifier and NOTHING reads
+// the ML detector (the engine-verifier tick returns before matchNotes and uses
+// getRawPitch for the live glow). ML is read only in native-frame detection and
+// the non-verifier fallback. So we arm the engine ML pipeline (via the new
+// setNoteDetectionEnabled bridge) only while at least one detector instance is
+// actually in a mode that reads ML — keyed per instance so one instance
+// disarming can't suspend ML for another still using it. No-op on a downlevel
+// addon that predates the bridge method (ML then runs as before — fail-safe).
+if (!_ndShared.mlGateWanters) _ndShared.mlGateWanters = new Set();
+if (typeof _ndShared.mlGateOn !== 'boolean') _ndShared.mlGateOn = false;
+function _ndSyncMlGate(token, wantsMl, audio) {
+    const wanters = _ndShared.mlGateWanters;
+    if (wantsMl) wanters.add(token); else wanters.delete(token);
+    const desired = wanters.size > 0;
+    if (desired === _ndShared.mlGateOn) return;          // already in the right state
+    if (!audio || typeof audio.setNoteDetectionEnabled !== 'function') return;
+    try {
+        audio.setNoteDetectionEnabled(desired);
+        _ndShared.mlGateOn = desired;                    // commit only on success → retries on failure
+    } catch (_) { /* downlevel / transient — leave state so a later sync retries */ }
+}
+
 const _ND_DIAGNOSTIC_FILENAME_MARKERS = [
     'slopsmith-diagnostic-basic-guitar.sloppak',
 ];
@@ -291,7 +316,7 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // exact build that produced it. The script tag has no `import`/`fetch`
 // hook to read package.json at load time, so this is the single
 // hand-maintained constant the diagnostic path keys off of.
-const _ND_VERSION = '1.25.0';
+const _ND_VERSION = '1.26.0';
 
 // Audio processing constants
 const _ND_MIN_YIN_SAMPLES = 4096;  // enough for low E at 48kHz (need tau=585, halfLen=2048)
@@ -2814,6 +2839,25 @@ function createNoteDetector(options = {}) {
     // existing Web-Audio teardown in stopAudio() is null-checked, so it
     // doesn't need its own branch on this flag.
     let usingDesktopBridge = false;
+    // Per-instance identity for the cross-instance ML gate refcount.
+    const _ndGateToken = {};
+    // Arm/suspend engine ML for THIS instance. ML is read only when the per-tick
+    // loop runs matchNotes/detectNotes/scoreChord — i.e. detection is live, on
+    // the desktop bridge, and NEITHER the host engine-verifier NOR a contained
+    // verifier is driving the chart slot (both score via the harmonic-comb
+    // NoteVerifier and never read ML). Native-frame mode and the non-verifier
+    // fallback keep both flags false, so they arm ML. Driven every detection
+    // tick (below) so it converges to the right state no matter how those flags
+    // changed — far more robust than syncing at each individual transition.
+    function _ndUpdateMlGate() {
+        // Mirror exactly the conditions under which the detection tick does
+        // ML-reading work: live + on the bridge + not the host verifier + the
+        // chart slot isn't held by a contained chart (ours OR a same-source
+        // sibling's — both bail the tick before any ML read).
+        const wantsMl = !!(enabled && usingDesktopBridge && !_ndUsingEngineVerifier
+            && !_ndHostChartSuspended && !_ndOtherOwnsOurSlot());
+        _ndSyncMlGate(_ndGateToken, wantsMl, _ndBridgeAudio());
+    }
     // Opt-in (gear toggle, `nativeDetection`) sub-mode of the desktop
     // bridge: pull the engine's post-gate PCM via getRawAudioFrame and run
     // note_detect's OWN YIN/HPS/CREPE on it, instead of consuming the
@@ -3477,6 +3521,11 @@ function createNoteDetector(options = {}) {
                     }
 
                     detectInterval = setInterval(async () => {
+                        // Converge the ML gate every tick — arms in modes that
+                        // read ML (native-frame / non-verifier fallback), suspends
+                        // under the host or contained verifier. Cheap: a Set check
+                        // that only hits the bridge on an actual state change.
+                        _ndUpdateMlGate();
                         if (!enabled || processingFrame) return;
                         processingFrame = true;
                         const gen = sessionGen;
@@ -3862,6 +3911,12 @@ function createNoteDetector(options = {}) {
     }
 
     function stopAudio() {
+        // Drop this instance's ML-gate claim while the bridge is still
+        // resolvable (bridgeDesktop is cleared below) so the engine ML pipeline
+        // suspends once no other detector instance still needs it. Explicit
+        // false rather than _ndUpdateMlGate() — usingDesktopBridge is still true
+        // here, so the predicate could otherwise miscompute a stale arm.
+        _ndSyncMlGate(_ndGateToken, false, _ndBridgeAudio());
         stopLevelMeter();
         stopBridgeLevelMeter();
         if (detectInterval) { clearInterval(detectInterval); detectInterval = null; }
