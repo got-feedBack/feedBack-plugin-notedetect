@@ -7,6 +7,10 @@
     "test": "node --test test/*.test.js",
     "regression": "node tools/regression.js",
     "regression:update": "node tools/regression.js --update-baseline tools/regression-baseline.json",
-    "regression:vs-baseline": "node tools/regression.js --baseline tools/regression-baseline.json"
+    "regression:vs-baseline": "node tools/regression.js --baseline tools/regression-baseline.json",
+    "render-skins": "node tools/render-skins.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0"
   }
 }

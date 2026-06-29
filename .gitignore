@@ -5,6 +5,7 @@ node_modules/
 __pycache__/
 *.pyc
 .slopsmith-installed.json
+tools/.theme-matrix/
 
 # Local regression-suite state. Fixtures point at recordings on the
 # contributor's machine (private), so they're not portable. Keep the
