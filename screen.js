@@ -291,7 +291,7 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // exact build that produced it. The script tag has no `import`/`fetch`
 // hook to read package.json at load time, so this is the single
 // hand-maintained constant the diagnostic path keys off of.
-const _ND_VERSION = '1.23.0';
+const _ND_VERSION = '1.24.0';
 
 // Audio processing constants
 const _ND_MIN_YIN_SAMPLES = 4096;  // enough for low E at 48kHz (need tau=585, halfLen=2048)
@@ -657,6 +657,48 @@ function _ndComputeBestDelta(prev, cur) {
     if (!prev) return { first: true, newBest: true, accDelta: 0, bestAcc: a };
     const pa = Math.round(Number(prev.accuracy) || 0);
     return { first: false, newBest: a > pa, accDelta: a - pa, bestAcc: Math.max(a, pa) };
+}
+
+// Contextual hero CTA — which action gets the emphasised (primary) slot on the
+// results card, chosen from the SHAPE of the result so the nudge points at the
+// highest-value next step instead of always "retry the whole song". Deliberate-
+// practice principle: when the failure is LOCALIZED to one section, drilling it
+// beats grinding bars you already own. Pure + tunable; the caller resolves the
+// section's loop range and renders. Everything stays a suggestion — nothing is
+// gated, and Retry remains available even when it isn't the hero.
+//   ctx: { accuracy, canRetry, sections: [{ name, acc|null }] }  (acc null = no
+//   notes in that section — skipped). Returns { kind, sectionName?, reason }.
+//     'practice-section' — one section is the clear weak outlier; drill it.
+//     'retry'            — broadly rough / no clear outlier; replay the whole.
+const _ND_HERO_SOLID_ACC = 80;     // overall must be at least this to localize
+const _ND_HERO_SECTION_PASS = 90;  // ...and the outlier still below a clean pass
+const _ND_HERO_SECTION_GAP = 15;   // ...and this many points under the overall
+function _ndPickHeroAction(ctx) {
+    const acc = Math.round(Number(ctx && ctx.accuracy) || 0);
+    const canRetry = !!(ctx && ctx.canRetry);
+    const sections = (ctx && Array.isArray(ctx.sections)) ? ctx.sections : [];
+    const fallback = {
+        kind: 'retry',
+        reason: acc < 60 ? 'Run it back — try it a touch slower.' : '',
+    };
+    if (!canRetry || !sections.length) return fallback;
+    let weakest = null;
+    for (const s of sections) {
+        if (!s || s.acc == null) continue;          // skip sections with no notes
+        const a = Math.round(Number(s.acc) || 0);
+        if (!weakest || a < weakest.acc) weakest = { name: s.name, acc: a };
+    }
+    if (weakest
+        && acc >= _ND_HERO_SOLID_ACC
+        && weakest.acc < _ND_HERO_SECTION_PASS
+        && (acc - weakest.acc) >= _ND_HERO_SECTION_GAP) {
+        return {
+            kind: 'practice-section',
+            sectionName: weakest.name,
+            reason: `Your accuracy's strong — ${weakest.name} is the last rough patch.`,
+        };
+    }
+    return fallback;
 }
 
 // ── Results-card share image (Copy card / Save) ──────────────────────────
@@ -15228,6 +15270,25 @@ function createNoteDetector(options = {}) {
             const t = s.hits + s.misses;
             return { name: s.name, acc: t > 0 ? Math.round((s.hits / t) * 100) : 0 };
         });
+        // Contextual hero CTA: pick which action gets the primary slot from the
+        // shape of the result. Sections with no notes contribute acc:null so a
+        // never-reached section can't masquerade as the weakest. When the pick
+        // is a section drill we must also know its loop range — fall back to a
+        // plain Retry hero if the range is unknown.
+        const _heroSectionInput = sectionStats.map((s) => {
+            const t = s.hits + s.misses;
+            return { name: s.name, acc: t > 0 ? Math.round((s.hits / t) * 100) : null };
+        });
+        const _heroPick = _ndPickHeroAction({ accuracy, canRetry, sections: _heroSectionInput });
+        let _heroRange = null;
+        if (_heroPick.kind === 'practice-section') {
+            _heroRange = _sectionRange(_heroPick.sectionName);
+            if (!_heroRange) _heroPick.kind = 'retry';
+        }
+        const _heroIsSection = _heroPick.kind === 'practice-section';
+        const heroReasonHtml = _heroPick.reason
+            ? `<div class="nd-sum-hero-reason">${_ndEscapeHtml(_heroPick.reason)}</div>`
+            : '';
         // Positive replacement for the (punishing) Misses cell: your best
         // section → else the song length → else the note total. `extraValue`
         // is the compact form for the share strip; `extraValueFull` carries
@@ -15311,9 +15372,11 @@ function createNoteDetector(options = {}) {
 
         // "Focus next" — name the weakest section as a next step, not a failure
         // (the growth-oriented replacement for a punishing letter grade). Only
-        // when a section sits meaningfully below a clean pass.
+        // when a section sits meaningfully below a clean pass. Suppressed when
+        // the contextual hero is already a drill of that same section (the hero
+        // button + its reason line say it more actionably — no need to repeat).
         let focusHtml = '';
-        if (sectionStats.length > 0) {
+        if (sectionStats.length > 0 && !_heroIsSection) {
             let weakest = null;
             for (const sec of sectionStats) {
                 const t = sec.hits + sec.misses;
@@ -15447,6 +15510,7 @@ function createNoteDetector(options = {}) {
                     <button type="button" class="nd-summary-save nd-btn"
                             title="Save the score card as a PNG">⤓ Save</button>
                 </div>
+                ${heroReasonHtml}
                 <div class="nd-sum-actions">
                     ${showReturnPrevBtn ? `
                     <button type="button" class="nd-summary-return-prev nd-btn">
@@ -15456,8 +15520,14 @@ function createNoteDetector(options = {}) {
                     <button class="nd-summary-download nd-btn">
                         Download Diagnostic JSON
                     </button>` : ''}
+                    ${_heroIsSection ? `
+                    <button type="button" class="nd-summary-hero-practice nd-btn nd-btn-primary"
+                            data-start="${_heroRange.start}" data-end="${_heroRange.end}"
+                            title="Loop ${_ndEscapeHtml(_heroPick.sectionName)} to practice it">
+                        Practice: ${_ndEscapeHtml(_heroPick.sectionName)}
+                    </button>` : ''}
                     ${canRetry ? `
-                    <button type="button" class="nd-summary-retry nd-btn nd-btn-primary">
+                    <button type="button" class="nd-summary-retry nd-btn${_heroIsSection ? '' : ' nd-btn-primary'}">
                         Retry Song
                     </button>` : ''}
                     <button type="button" class="nd-summary-close nd-btn${canRetry ? '' : ' nd-btn-primary'}">
@@ -15516,7 +15586,9 @@ function createNoteDetector(options = {}) {
         // handoff (window._pendingHighwayLoop), the same mechanism the editor's
         // "Loop in 3D" uses: stash the loop, call playSong, and the host arms
         // the loop + starts playback once the chart is ready.
-        (overlay.querySelectorAll('.nd-sum-practice') || []).forEach((pBtn) => {
+        // Includes the contextual hero "Practice: <section>" button — it carries
+        // the same data-start/data-end, so it reuses this exact loop launcher.
+        (overlay.querySelectorAll('.nd-sum-practice, .nd-summary-hero-practice') || []).forEach((pBtn) => {
             pBtn.onclick = () => {
                 if (!canRetry) { _ndDismissSummary(true); return; }
                 const a = Number(pBtn.dataset.start), b = Number(pBtn.dataset.end);
