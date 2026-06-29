@@ -679,7 +679,9 @@ function _ndPickHeroAction(ctx) {
     const sections = (ctx && Array.isArray(ctx.sections)) ? ctx.sections : [];
     const fallback = {
         kind: 'retry',
-        reason: acc < 60 ? 'Run it back — try it a touch slower.' : '',
+        // Only nudge "run it back" when a retry is actually offered — otherwise
+        // the reason line would tell the user to replay with no Retry button.
+        reason: (canRetry && acc < 60) ? 'Run it back — try it a touch slower.' : '',
     };
     if (!canRetry || !sections.length) return fallback;
     let weakest = null;
@@ -752,6 +754,7 @@ function _ndAutoSaveEnabled() {
 // (no setting); the value only ever rises, and it's the user's own private
 // trajectory data.
 const _ND_SONG_BEST_KEY = 'slopsmith_notedetect_song_best';
+const _ND_SONG_BEST_MAX = 600;   // cap entries so the map can't grow unbounded
 function _ndSongBestId(filename, arrangementIndex) {
     return String(filename || '') + '#'
         + (Number.isFinite(arrangementIndex) ? arrangementIndex : '');
@@ -779,6 +782,14 @@ function _ndWriteSongBest(id, run) {
             bestStreak: max('bestStreak'),
             ts: Date.now(),
         };
+        // Bound the map: past the cap, evict the least-recently-updated entries
+        // so the blob can't grow without limit (and trip quota, which would then
+        // silently stop recording every song's best).
+        const keys = Object.keys(map);
+        if (keys.length > _ND_SONG_BEST_MAX) {
+            keys.sort((a, b) => (Number(map[a].ts) || 0) - (Number(map[b].ts) || 0));
+            for (const k of keys.slice(0, keys.length - _ND_SONG_BEST_MAX)) delete map[k];
+        }
         localStorage.setItem(_ND_SONG_BEST_KEY, JSON.stringify(map));
     } catch (e) { /* non-fatal — best-tracking is cosmetic */ }
 }
@@ -15283,7 +15294,10 @@ function createNoteDetector(options = {}) {
         let _heroRange = null;
         if (_heroPick.kind === 'practice-section') {
             _heroRange = _sectionRange(_heroPick.sectionName);
-            if (!_heroRange) _heroPick.kind = 'retry';
+            // No loop range for the section → fall back to a plain Retry hero;
+            // drop the section reason too, so the line can't say "drill <X>"
+            // while the rendered hero is actually Retry.
+            if (!_heroRange) { _heroPick.kind = 'retry'; _heroPick.reason = ''; }
         }
         const _heroIsSection = _heroPick.kind === 'practice-section';
         const heroReasonHtml = _heroPick.reason

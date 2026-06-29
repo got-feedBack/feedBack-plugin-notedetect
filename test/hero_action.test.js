@@ -76,3 +76,10 @@ test('no sections → Retry', () => {
     const core = loadDetectionCore();
     assert.equal(core.pickHeroAction({ accuracy: 88, canRetry: true, sections: [] }).kind, 'retry');
 });
+
+test('cannot retry + rough run → no "run it back" reason (no retry button to back)', () => {
+    const core = loadDetectionCore();
+    const r = core.pickHeroAction({ accuracy: 45, canRetry: false, sections: [] });
+    assert.equal(r.kind, 'retry');
+    assert.equal(r.reason, '');   // the nudge would contradict a missing Retry button
+});
