@@ -618,6 +618,17 @@ body:has(#v3-upnext) .nd-hud {
     color: var(--nd-accent);
 }
 
+/* Contextual-hero reason — one quiet line that explains why the emphasised
+   action is what it is (e.g. drilling the one weak section). Sits just above
+   the action row; deliberately understated so the hero button leads. */
+.nd-sum-hero-reason {
+    margin: 0.2rem 0 0.5rem;
+    text-align: center;
+    font-size: 0.74rem;
+    line-height: 1.3;
+    color: var(--nd-dim);
+}
+
 /* Per-section / miss-breakdown bars. */
 .nd-sum-subhead {
     margin: 0.55rem 0 0.3rem;

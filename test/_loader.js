@@ -191,7 +191,7 @@ function loadDetectionCore({ sandboxBeforeRun } = {}) {
         '_ndConstraintCheckString', '_ndScoreChord',
         '_ndClassifyTiming', '_ndClassifyPitch', '_ndMakeJudgment',
         '_ndMultiplierForStreak', '_ndIsStreakMilestone', '_ndGradeFor',
-        '_ndComputeBestDelta',
+        '_ndComputeBestDelta', '_ndPickHeroAction',
         'createNoteDetector',
     ];
     const missing = required.filter(name => typeof sandbox[name] !== 'function');
@@ -313,6 +313,7 @@ function loadDetectionCore({ sandboxBeforeRun } = {}) {
         isStreakMilestone: sandbox._ndIsStreakMilestone,
         gradeFor: sandbox._ndGradeFor,
         computeBestDelta: sandbox._ndComputeBestDelta,
+        pickHeroAction: sandbox._ndPickHeroAction,
         // Results-card share helpers (pure — image/clipboard paths are
         // browser-only and not exposed).
         instrumentLabel: sandbox._ndInstrumentLabel,
