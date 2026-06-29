@@ -515,11 +515,21 @@ body:has(#v3-upnext) .nd-hud {
    rather than one out-of-place button. Score stays flat accent; themes per skin
    via --nd-accent/--nd-accent2. */
 .nd-sum-acc-n {
-    background: var(--nd-acc-fill, linear-gradient(135deg, var(--nd-accent), var(--nd-accent2)));
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
-    color: transparent;
+    /* Solid accent base — stays legible everywhere, including any engine that
+       doesn't honour text background-clip (where transparent text would vanish). */
+    color: var(--nd-accent);
+}
+/* Apply the clipped accent fill only where supported (Electron/Chrome do; this
+   keeps the number visible on anything that doesn't). --nd-acc-fill always
+   resolves to a paint (skin value, else the gradient fallback) — never `none`. */
+@supports ((background-clip: text) or (-webkit-background-clip: text)) {
+    .nd-sum-acc-n {
+        background: var(--nd-acc-fill, linear-gradient(135deg, var(--nd-accent), var(--nd-accent2)));
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+        color: transparent;
+    }
 }
 /* "Results text glow" A/B setting — re-enables the glow on the big readouts. */
 .nd-glow .nd-sum-score,
