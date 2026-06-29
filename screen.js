@@ -291,7 +291,7 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // exact build that produced it. The script tag has no `import`/`fetch`
 // hook to read package.json at load time, so this is the single
 // hand-maintained constant the diagnostic path keys off of.
-const _ND_VERSION = '1.22.0';
+const _ND_VERSION = '1.23.0';
 
 // Audio processing constants
 const _ND_MIN_YIN_SAMPLES = 4096;  // enough for low E at 48kHz (need tau=585, halfLen=2048)
@@ -646,6 +646,19 @@ function _ndGradeFor(accuracy) {
         : 'F';
 }
 
+// "Beat your best" delta for the results card — compares this run's accuracy to
+// the stored personal best for the same song+arrangement. Pure; localStorage
+// I/O lives in _ndReadSongBest/_ndWriteSongBest. `prev` is null/undefined on a
+// first clear (caller renders nothing then — you can't beat a best you don't
+// have yet). Guilt guard: it only reports the positive/neutral facts (a gain,
+// a tie, or your standing best); the caller never renders a red "−N%".
+function _ndComputeBestDelta(prev, cur) {
+    const a = Math.round(Number(cur && cur.accuracy) || 0);
+    if (!prev) return { first: true, newBest: true, accDelta: 0, bestAcc: a };
+    const pa = Math.round(Number(prev.accuracy) || 0);
+    return { first: false, newBest: a > pa, accDelta: a - pa, bestAcc: Math.max(a, pa) };
+}
+
 // ── Results-card share image (Copy card / Save) ──────────────────────────
 // A shareable PNG of the end-of-song results, rendered in note_detect's own
 // skin (palette + display fonts read live off the overlay), NOT the host's.
@@ -690,6 +703,42 @@ function _ndSaveDir() {
 function _ndAutoSaveEnabled() {
     try { return localStorage.getItem('slopsmith_notedetect_autosave_card') === '1'; }
     catch (e) { return false; }
+}
+
+// Personal-best store for the "beat your best" delta — one localStorage map
+// keyed by song+arrangement, holding the field-wise best run seen. Always on
+// (no setting); the value only ever rises, and it's the user's own private
+// trajectory data.
+const _ND_SONG_BEST_KEY = 'slopsmith_notedetect_song_best';
+function _ndSongBestId(filename, arrangementIndex) {
+    return String(filename || '') + '#'
+        + (Number.isFinite(arrangementIndex) ? arrangementIndex : '');
+}
+function _ndReadSongBest(id) {
+    try {
+        const raw = localStorage.getItem(_ND_SONG_BEST_KEY);
+        if (!raw) return null;
+        const map = JSON.parse(raw);
+        return (map && map[id]) ? map[id] : null;
+    } catch (e) { return null; }
+}
+function _ndWriteSongBest(id, run) {
+    try {
+        let map = {};
+        const raw = localStorage.getItem(_ND_SONG_BEST_KEY);
+        if (raw) { try { map = JSON.parse(raw) || {}; } catch (e) { map = {}; } }
+        const prev = map[id] || null;
+        const max = (k, scale) => Math.max(
+            Math.round((Number(run[k]) || 0) * (scale || 1)) / (scale || 1),
+            prev ? (Number(prev[k]) || 0) : 0);
+        map[id] = {
+            accuracy: max('accuracy'),
+            score: max('score'),
+            bestStreak: max('bestStreak'),
+            ts: Date.now(),
+        };
+        localStorage.setItem(_ND_SONG_BEST_KEY, JSON.stringify(map));
+    } catch (e) { /* non-fatal — best-tracking is cosmetic */ }
 }
 
 // Transient skin-themed toast (used for "Saved to …"). Self-removing.
@@ -15127,6 +15176,32 @@ function createNoteDetector(options = {}) {
         const retryFilename = _ndShared.currentFilename || '';
         const canRetry = !!retryFilename && typeof window.playSong === 'function';
         const artUrl = _ndSongArtUrl(retryFilename);
+        // "Beat your best" delta: read the stored best for THIS song+arrangement
+        // BEFORE recording the current run, so a natural-end take shows a true
+        // "vs your best" figure. Persist only on the natural song-end completion
+        // (claimAutoExit) — a manual/forced re-show must not bank a take.
+        const _bestId = _ndSongBestId(retryFilename, arrangementIndex);
+        const _prevBest = retryFilename ? _ndReadSongBest(_bestId) : null;
+        const _bestDelta = _ndComputeBestDelta(_prevBest, { accuracy });
+        if (retryFilename && opts && opts.claimAutoExit) {
+            _ndWriteSongBest(_bestId, { accuracy, score, bestStreak });
+        }
+        // Only render the line once a prior best exists (you can't beat a best
+        // you don't have yet). Guilt-guarded: gain → green "New best"; tie →
+        // neutral "Matched"; lower → just your standing best, never a red −N%.
+        let bestHtml = '';
+        if (_prevBest) {
+            let cls = 'nd-sum-best', txt;
+            if (_bestDelta.newBest) {
+                cls += ' nd-sum-best--up';
+                txt = `★ New best · +${_bestDelta.accDelta}% accuracy`;
+            } else if (_bestDelta.accDelta === 0) {
+                txt = `Matched your best · ${_bestDelta.bestAcc}%`;
+            } else {
+                txt = `Your best · ${_bestDelta.bestAcc}%`;
+            }
+            bestHtml = `<div class="${cls}">${_ndEscapeHtml(txt)}</div>`;
+        }
         // Section time ranges (for the per-section "Practice This Section"
         // loop buttons). Captured now from the live highway — getSections()
         // returns [{time,name}] in chart order; a section's end is the next
@@ -15354,6 +15429,7 @@ function createNoteDetector(options = {}) {
                     <div class="nd-sum-acc"><span class="nd-sum-acc-n">0</span>%<div class="nd-sum-label">Accuracy</div></div>
                     <div class="nd-sum-score"><span class="nd-sum-score-n">0</span><div class="nd-sum-label">Score</div></div>
                 </div>
+                ${bestHtml}
                 <div class="nd-sum-stats">
                     <div class="nd-sum-stat" style="--row-i:0"><span class="nd-sum-stat-label">Hits</span><span class="nd-sum-stat-val nd-val-good">${hits}/${total}</span></div>
                     <div class="nd-sum-stat" style="--row-i:1"><span class="nd-sum-stat-label">${_ndEscapeHtml(extraLabel)}</span><span class="nd-sum-stat-val nd-val-accent">${_ndEscapeHtml(extraValueFull)}</span></div>
