@@ -535,6 +535,23 @@ body:has(#v3-upnext) .nd-hud {
     color: var(--nd-dim);
 }
 
+/* "Beat your best" delta — one compact line under the headline. Neutral (dim)
+   for a tie / your standing best; accent-lit only on a genuine new best. Never
+   shows a negative, so it can't shame a rough run. */
+.nd-sum-best {
+    margin: -0.35rem 0 0.65rem;
+    text-align: center;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--nd-dim);
+}
+.nd-sum-best--up {
+    color: var(--nd-hit);
+    text-shadow: var(--nd-glow-current);
+}
+
 /* Stat rows — staggered slide-in via per-row --row-i delays. */
 .nd-sum-stats {
     display: grid;
