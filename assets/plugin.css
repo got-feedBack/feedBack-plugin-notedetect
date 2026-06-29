@@ -79,6 +79,17 @@
     --nd-ring-animation: nd-ring-spin 4s linear infinite;
     --nd-bevel: 0 0 22px rgba(0, 240, 255, 0.14);
     --nd-texture: none;            /* optional panel texture (metal)        */
+    /* Hero-CTA emphasis device — HOW a skin makes the primary action special.
+       neon/metal use the glow-ring; a glow-less skin (esports) zeroes the ring
+       and emphasises with a solid accent border instead. --nd-acc-fill is the
+       Accuracy hero-number fill (a gradient here; a solid accent where a
+       gradient would wash out). This per-skin "device" split is exactly what
+       the host-theme contract should generalise so a feature can't bind to one
+       skin's language by accident. */
+    --nd-hero-ring-idle: 0.5;      /* glow-ring opacity at rest               */
+    --nd-hero-ring-on: 1;          /* ...on hover/focus/press                 */
+    --nd-hero-border: transparent; /* solid emphasis border for ring-less skins */
+    --nd-acc-fill: linear-gradient(135deg, var(--nd-accent), var(--nd-accent2));
 }
 
 /* Clean esports / AAA-minimal: one amber accent, no glow, angled corners. */
@@ -110,6 +121,13 @@
     --nd-ring-animation: nd-ring-spin 7s linear infinite;
     --nd-bevel: none;
     --nd-texture: none;
+    /* No glow here: drop the hero ring and emphasise the primary with a solid
+       amber border; render the Accuracy number as a solid accent so it doesn't
+       vanish into a near-white gradient. */
+    --nd-hero-ring-idle: 0;
+    --nd-hero-ring-on: 0;
+    --nd-hero-border: var(--nd-accent);
+    --nd-acc-fill: var(--nd-accent);
 }
 
 /* Rock / metal: brushed-steel panel, hard bevels, stencil grade type.
@@ -492,6 +510,17 @@ body:has(#v3-upnext) .nd-hud {
        the digits and hurt legibility (community feedback). The glow is an
        opt-in A/B (.nd-glow below) for design review. */
 }
+/* Coherence: echo the hero accent gradient on the Accuracy hero number, so the
+   rainbow reads as an intentional system (frame ring → accuracy → Retry CTA)
+   rather than one out-of-place button. Score stays flat accent; themes per skin
+   via --nd-accent/--nd-accent2. */
+.nd-sum-acc-n {
+    background: var(--nd-acc-fill, linear-gradient(135deg, var(--nd-accent), var(--nd-accent2)));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+}
 /* "Results text glow" A/B setting — re-enables the glow on the big readouts. */
 .nd-glow .nd-sum-score,
 .nd-glow .nd-sum-acc {
@@ -741,11 +770,59 @@ body:has(#v3-upnext) .nd-hud {
     border-color: var(--nd-accent);
 }
 .nd-btn-primary {
+    position: relative;
+    isolation: isolate;          /* contain the glow-ring's stacking to this button */
     color: #fff;
     background: linear-gradient(135deg, var(--nd-accent), var(--nd-accent2));
-    border-color: transparent;
+    /* Solid emphasis border for skins that don't use the glow-ring (esports);
+       transparent where the ring carries it (neon/metal). */
+    border-color: var(--nd-hero-border, transparent);
+    /* Lift the white label off the magenta end of the gradient (white there is
+       ~2.6:1); invisible over the cyan end. */
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+    transition: background 0.15s, border-color 0.15s, filter 0.15s,
+                transform 0.08s ease;
 }
-.nd-btn-primary:hover { filter: brightness(1.12); }
+/* Hero "glow-ring echo": a miniature of the card-frame ring (.nd-sum-frame),
+   cut from the SAME --nd-ring-* tokens so it themes per skin and visually
+   rhymes with the panel border — directly answering "the rainbow doesn't match
+   the card." Dim + static at rest; it brightens and the sweep wakes only on
+   hover/focus/press, so the emphasis tracks the user's intent rather than
+   flashing on its own. */
+.nd-btn-primary::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: var(--nd-ring-w);
+    background: conic-gradient(from var(--nd-ring-angle), var(--nd-ring-stops));
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    mask-composite: exclude;
+    opacity: var(--nd-hero-ring-idle, 0.5);   /* 0 on glow-less skins → ring off */
+    transition: opacity 0.18s ease;
+    pointer-events: none;
+}
+/* Re-assert the gradient fill on hover/focus/press. Without this, the generic
+   `.nd-btn:hover` background (specificity 0,2,0 vs this base rule's 0,1,0)
+   replaces the gradient with flat grey — the reported "turns grey on hover"
+   bug. Grouping hover + focus-visible + active here (also 0,2,0, but later in
+   source order → wins the tie, no !important) keeps the gradient and gives
+   keyboard parity. */
+.nd-btn-primary:hover,
+.nd-btn-primary:focus-visible,
+.nd-btn-primary:active {
+    background: linear-gradient(135deg, var(--nd-accent), var(--nd-accent2));
+    filter: brightness(1.08);
+}
+.nd-btn-primary:hover::after,
+.nd-btn-primary:focus-visible::after,
+.nd-btn-primary:active::after {
+    opacity: var(--nd-hero-ring-on, 1);
+    animation: var(--nd-ring-animation);
+}
+.nd-btn-primary:active { transform: translateY(1px) scale(0.985); }
 
 /* Reduced motion: reveal-gated elements must still become visible when the
    keyframes are off. */
@@ -768,6 +845,13 @@ body:has(#v3-upnext) .nd-hud {
     .nd-sum-frame::after {
         animation: none;
     }
+    /* Hero CTA: still brightens on hover (opacity), but never sweeps or pops. */
+    .nd-btn-primary:hover::after,
+    .nd-btn-primary:focus-visible::after,
+    .nd-btn-primary:active::after {
+        animation: none;
+    }
+    .nd-btn-primary:active { transform: none; }
 }
 
 /* ── Save confirmation toast ─────────────────────────────────────────────
