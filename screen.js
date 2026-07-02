@@ -12836,6 +12836,14 @@ function createNoteDetector(options = {}) {
         const overlay = instanceRoot.querySelector('.nd-summary-overlay');
         if (overlay) {
             overlay.style.display = '';
+            // A queue Up-Next countdown built on a hidden card is held until
+            // now — starting it any earlier could advance the queue before the
+            // card was ever visible (see showSummary's _ndStartUpNext).
+            if (typeof overlay._ndStartUpNext === 'function') {
+                const _start = overlay._ndStartUpNext;
+                overlay._ndStartUpNext = null;
+                _start();
+            }
             // Play the reveal sequence now that the overlay is actually
             // visible, using the stats captured at build time (the live
             // counters may already belong to the next song).
@@ -15564,7 +15572,7 @@ function createNoteDetector(options = {}) {
             ? _ndQueue.peekNext() : null;
         // Filename-derived label first; upgraded to the real title async.
         const _ndQueueNextLabel = _ndQueueNext
-            ? String(_ndQueueNext.filename).split('/').pop().replace(/\.sloppak$/i, '')
+            ? String(_ndQueueNext.filename).split('/').pop().replace(/\.(feedpak|sloppak)$/i, '')
             : '';
         // The results card is a terminal "choose your next action" screen, not a
         // throwaway popover: a stray click on the dim backdrop must NOT leave the
@@ -15659,7 +15667,12 @@ function createNoteDetector(options = {}) {
             const countEl = overlay.querySelector('.nd-sum-upnext-count');
             const titleEl = overlay.querySelector('.nd-sum-upnext-title');
             try {
-                fetch('/api/song/' + encodeURIComponent(_ndQueueNext.filename))
+                // Encode each path segment but preserve the '/' separators —
+                // the {filename:path} route matches on the real slashes, so a
+                // whole-string encodeURIComponent (%2F) would miss nested paths.
+                const _ndNextUrl = String(_ndQueueNext.filename)
+                    .split('/').map(encodeURIComponent).join('/');
+                fetch('/api/song/' + _ndNextUrl)
                     .then((r) => (r && r.ok ? r.json() : null))
                     .then((m) => {
                         if (m && m.title && titleEl && titleEl.isConnected) {
@@ -15675,6 +15688,10 @@ function createNoteDetector(options = {}) {
                 if (stayBtn) stayBtn.style.display = 'none';
             };
             const _ndQueueAdvance = () => {
+                // Idempotent: once the card is gone (a prior advance, or another
+                // path closed it) never advance again — guards a double-click on
+                // Play now and a delay-0 setTimeout that fires after a close.
+                if (!overlay.isConnected) return;
                 _ndStopCountdown();
                 _ndAutoExitRelease = null;      // drop the hold without navigating
                 overlay.remove();
@@ -15683,11 +15700,18 @@ function createNoteDetector(options = {}) {
             if (nextBtn) nextBtn.onclick = _ndQueueAdvance;
             if (stayBtn) stayBtn.onclick = _ndStopCountdown;
             let _ndSecsLeft = _ndQueueDelaySeconds();
-            if (_ndSecsLeft <= 0) {
-                // 0 = the user chose instant advance; defer past the current
-                // render so teardown never races the card's own setup.
-                setTimeout(_ndQueueAdvance, 0);
-            } else {
+            // Start the countdown only once the card is actually visible. A card
+            // built hidden (startHidden — the training-recording flow) must NOT
+            // count down (or, at delay 0, advance) while off-screen, or the queue
+            // could move on before the user ever sees the score. _runDeferredSummary
+            // fires this on reveal; a visible card starts it immediately.
+            const _ndStartUpNext = () => {
+                if (_ndSecsLeft <= 0) {
+                    // 0 = the user chose instant advance; defer past the current
+                    // render so teardown never races the card's own setup.
+                    setTimeout(_ndQueueAdvance, 0);
+                    return;
+                }
                 if (countEl) countEl.textContent = 'starting in ' + Math.ceil(_ndSecsLeft) + 's';
                 _ndAdvanceTimer = setInterval(() => {
                     // Another path (Retry / Return to Previous / Exit) closed
@@ -15697,7 +15721,9 @@ function createNoteDetector(options = {}) {
                     if (_ndSecsLeft <= 0) { _ndQueueAdvance(); return; }
                     if (countEl) countEl.textContent = 'starting in ' + Math.ceil(_ndSecsLeft) + 's';
                 }, 1000);
-            }
+            };
+            if (opts && opts.startHidden) { overlay._ndStartUpNext = _ndStartUpNext; }
+            else { _ndStartUpNext(); }
             if (closeBtn) closeBtn.onclick = () => {
                 _ndStopCountdown();
                 try { _ndQueue.clear(); } catch (e) {}
