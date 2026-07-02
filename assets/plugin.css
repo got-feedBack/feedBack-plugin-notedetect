@@ -813,6 +813,64 @@ body:has(#v3-upnext) .nd-hud {
     font-size: 0.68rem;
 }
 
+/* End-of-set summary (after the last queued song): per-song rows. */
+.nd-set-rows {
+    margin-top: 0.9rem;
+    max-height: 40vh;
+    overflow-y: auto;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 10px;
+}
+.nd-set-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.45rem 0.7rem;
+    text-align: left;
+}
+.nd-set-row + .nd-set-row {
+    border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+.nd-set-row-n {
+    flex: 0 0 auto;
+    font-size: 0.65rem;
+    opacity: 0.55;
+    font-variant-numeric: tabular-nums;
+    min-width: 1.2em;
+}
+.nd-set-row-title {
+    flex: 1 1 auto;
+    font-size: 0.78rem;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.nd-set-row-acc {
+    flex: 0 0 auto;
+    font-weight: 700;
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--nd-accent);
+}
+
+/* "Show each song's score card" OFF (queue context): the card collapses to
+   the Up-Next countdown strip — the score DOM stays (all wiring/animation
+   paths run unchanged), it's just not shown. Exit stays reachable. */
+.nd-sum-scoreless .nd-sum-confetti,
+.nd-sum-scoreless .nd-sum-fc,
+.nd-sum-scoreless .nd-sum-headline,
+.nd-sum-scoreless .nd-sum-best,
+.nd-sum-scoreless .nd-sum-stats,
+.nd-sum-scoreless .nd-sum-xp,
+.nd-sum-scoreless .nd-sum-sections,
+.nd-sum-scoreless .nd-sum-focus,
+.nd-sum-scoreless .nd-sum-share,
+.nd-sum-scoreless .nd-sum-hero-reason,
+.nd-sum-scoreless .nd-sum-actions > .nd-btn:not(.nd-summary-close) {
+    display: none;
+}
+
 /* Action buttons. */
 .nd-sum-actions {
     display: flex;
