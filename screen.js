@@ -316,7 +316,7 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // exact build that produced it. The script tag has no `import`/`fetch`
 // hook to read package.json at load time, so this is the single
 // hand-maintained constant the diagnostic path keys off of.
-const _ND_VERSION = '1.27.0';
+const _ND_VERSION = '1.28.0';
 
 // Audio processing constants
 const _ND_MIN_YIN_SAMPLES = 4096;  // enough for low E at 48kHz (need tau=585, halfLen=2048)
@@ -783,6 +783,44 @@ function _ndQueueDelaySeconds() {
         const v = parseFloat(localStorage.getItem('slopsmith_notedetect_queue_delay'));
         return (Number.isFinite(v) && v >= 0) ? v : 10;
     } catch (e) { return 10; }
+}
+
+// Playlist-queue display toggles (both default ON; settings.html writes the
+// keys). "Show scores" off collapses a queued song's card to just the
+// Up-Next countdown — advance on the countdown alone; the set still logs
+// for the end-of-set summary. "Set summary" off skips the summary card
+// after the last song.
+function _ndQueueShowScores() {
+    try { return localStorage.getItem('slopsmith_notedetect_queue_show_scores') !== '0'; }
+    catch (e) { return true; }
+}
+
+function _ndQueueSetSummaryEnabled() {
+    try { return localStorage.getItem('slopsmith_notedetect_queue_set_summary') !== '0'; }
+    catch (e) { return true; }
+}
+
+// End-of-set score log (playlist "Play All"): one entry per naturally-
+// finished queued song — {pos, total, filename, title, artist, accuracy,
+// hits, misses} — consumed by the end-of-set summary card after the last
+// song. Module-level: one queue plays at a time.
+let _ndSetLog = [];
+
+// Pure append-or-restart: a fresh set (first entry, a different queue
+// length, or a position that doesn't advance the log) RESTARTS the log —
+// that's how a new "Play All" run is detected without a queue session id.
+// Positions may skip forward (a queued song with too few scored notes
+// never cards, so it never logs); they just have to advance.
+function _ndSetLogAppend(log, entry) {
+    if (!entry || !Number.isFinite(entry.pos)) return log;
+    const last = log.length ? log[log.length - 1] : null;
+    if (!last || entry.total !== last.total || entry.pos <= last.pos) return [entry];
+    return log.concat([entry]);
+}
+
+function _ndSetLogAverage(log) {
+    if (!log || !log.length) return 0;
+    return Math.round(log.reduce((s, e) => s + (e.accuracy || 0), 0) / log.length);
 }
 
 // Personal-best store for the "beat your best" delta — one localStorage map
@@ -15574,6 +15612,80 @@ function createNoteDetector(options = {}) {
         const _ndQueueNextLabel = _ndQueueNext
             ? String(_ndQueueNext.filename).split('/').pop().replace(/\.(feedpak|sloppak)$/i, '')
             : '';
+        // End-of-set bookkeeping. A NATURAL song-end in queue context appends
+        // this song to the set log (claimAutoExit only — a manual/forced
+        // re-show of the card must not double-count a song). The current
+        // position is peekNext().index - 1; on the LAST song (queue active,
+        // nothing next) it's inferred from the log, which is exact whenever
+        // the previous song logged (the overwhelmingly common case).
+        const _ndQueueActive = !!(_ndQueue && typeof _ndQueue.active === 'function'
+            && _ndQueue.active() && typeof _ndQueue.peekNext === 'function');
+        if (_ndQueueActive && opts && opts.claimAutoExit) {
+            const _ndPrevEntry = _ndSetLog.length ? _ndSetLog[_ndSetLog.length - 1] : null;
+            _ndSetLog = _ndSetLogAppend(_ndSetLog, {
+                pos: _ndQueueNext ? (_ndQueueNext.index - 1)
+                    : (_ndPrevEntry ? _ndPrevEntry.pos + 1 : 0),
+                total: _ndQueueNext ? _ndQueueNext.total
+                    : (_ndPrevEntry ? _ndPrevEntry.total : 1),
+                filename: retryFilename,
+                title: songTitle
+                    || String(retryFilename).split('/').pop().replace(/\.sloppak$/i, ''),
+                artist: songArtist,
+                accuracy: accuracy, hits: hits, misses: misses,
+            });
+        }
+        // The set is done when the last queued song's natural card is up. Two
+        // songs minimum — a one-song "set" summary would just repeat the card.
+        const _ndSetDone = _ndQueueActive && !_ndQueueNext
+            && _ndQueueSetSummaryEnabled() && _ndSetLog.length >= 2;
+        // Scores hidden mid-queue: the card collapses (CSS) to the Up-Next
+        // countdown strip — advance on the countdown alone, per the design
+        // thread. All score DOM still exists (hidden), so every existing
+        // wiring/animation path runs unchanged.
+        const _ndScoreless = !_ndQueueShowScores() && _ndQueueActive && !!_ndQueueNext;
+        if (_ndScoreless) { try { overlay.classList.add('nd-sum-scoreless'); } catch (e) {} }
+        // End-of-set summary (the design thread's ask: averaged + per-song
+        // list). Renders INTO the existing overlay — same auto-exit hold,
+        // same dismiss path — replacing the last song's card content. Exit
+        // is the only action: the set is over, so it retires the log, clears
+        // the (already-exhausted) queue for safety, and does the real exit.
+        const _ndRenderSetSummary = () => {
+            const log = _ndSetLog.slice();
+            const avg = _ndSetLogAverage(log);
+            const src = (_ndQueue && typeof _ndQueue.source === 'function'
+                && _ndQueue.source()) || '';
+            const rows = log.map((e, i) => `
+                <div class="nd-set-row">
+                    <span class="nd-set-row-n">${i + 1}</span>
+                    <span class="nd-set-row-title">${_ndEscapeHtml(e.artist ? (e.artist + ' — ' + e.title) : e.title)}</span>
+                    <span class="nd-set-row-acc">${Number(e.accuracy) || 0}%</span>
+                </div>`).join('');
+            overlay.classList.remove('nd-sum-scoreless');
+            overlay.innerHTML = `
+                <div class="nd-sum-shell">
+                <div class="nd-sum-panel">
+                    <div class="nd-sum-header">Set Complete</div>
+                    ${src ? `<div class="nd-sum-song">${_ndEscapeHtml(src)}</div>` : ''}
+                    <div class="nd-sum-headline">
+                        <div class="nd-sum-acc"><span class="nd-sum-acc-n">${avg}</span>%<div class="nd-sum-label">Average accuracy</div></div>
+                        <div class="nd-sum-score"><span class="nd-sum-score-n">${log.length}</span><div class="nd-sum-label">Songs played</div></div>
+                    </div>
+                    <div class="nd-set-rows">${rows}</div>
+                    <div class="nd-sum-actions">
+                        <button type="button" class="nd-summary-close nd-btn nd-btn-primary">Exit Song</button>
+                    </div>
+                </div>
+                <div class="nd-sum-frame"></div>
+                </div>
+            `;
+            try { overlay.classList.add('nd-revealed'); } catch (e) {}
+            const exitBtn = overlay.querySelector('.nd-summary-close');
+            if (exitBtn) exitBtn.onclick = () => {
+                _ndSetLog = [];
+                try { if (_ndQueue) _ndQueue.clear(); } catch (e) {}
+                _ndDismissSummary(true);
+            };
+        };
         // The results card is a terminal "choose your next action" screen, not a
         // throwaway popover: a stray click on the dim backdrop must NOT leave the
         // song (feedBack — "clicking outside of the card leaves the song"). Exit
@@ -15623,7 +15735,14 @@ function createNoteDetector(options = {}) {
                         <button type="button" class="nd-summary-next nd-btn nd-btn-primary">▶ Play now</button>
                         <button type="button" class="nd-summary-stay nd-btn">⏸ Stay</button>
                     </span>
-                </div>` : ''}
+                </div>` : (_ndSetDone ? `
+                <div class="nd-sum-upnext">
+                    <span class="nd-sum-upnext-meta">Set complete (${_ndSetLog.length} songs)</span>
+                    <span class="nd-sum-upnext-title">Average accuracy ${_ndSetLogAverage(_ndSetLog)}%</span>
+                    <span class="nd-sum-upnext-btns">
+                        <button type="button" class="nd-summary-setsum nd-btn nd-btn-primary">View set summary</button>
+                    </span>
+                </div>` : '')}
                 <div class="nd-sum-actions">
                     ${showReturnPrevBtn ? `
                     <button type="button" class="nd-summary-return-prev nd-btn">
@@ -15727,6 +15846,19 @@ function createNoteDetector(options = {}) {
             if (closeBtn) closeBtn.onclick = () => {
                 _ndStopCountdown();
                 try { _ndQueue.clear(); } catch (e) {}
+                _ndDismissSummary(true);
+            };
+        }
+        // Last queued song: the strip's "View set summary" swaps the card to
+        // the set summary in place; Exit — with or without viewing it —
+        // retires the finished set's log so a later run can't inherit it.
+        // (No conflict with the queue-mode Exit override above: _ndSetDone
+        // implies there is no next track, so that branch didn't run.)
+        if (_ndSetDone) {
+            const setsumBtn = overlay.querySelector('.nd-summary-setsum');
+            if (setsumBtn) setsumBtn.onclick = _ndRenderSetSummary;
+            if (closeBtn) closeBtn.onclick = () => {
+                _ndSetLog = [];
                 _ndDismissSummary(true);
             };
         }
@@ -15859,6 +15991,12 @@ function createNoteDetector(options = {}) {
             && typeof window.slopsmith.holdAutoExit === 'function') {
             try { _ndAutoExitRelease = window.slopsmith.holdAutoExit(); } catch (e) {}
         }
+
+        // Scores hidden + set complete: the set summary IS the score surface
+        // in that mode, so swap the card to it immediately. Placed after the
+        // hold claim on purpose — the summary relies on the same deferred
+        // return the card does (Exit navigates via _ndDismissSummary).
+        if (_ndSetDone && !_ndQueueShowScores()) _ndRenderSetSummary();
 
         publishToJournal(accuracy);
         return true;
