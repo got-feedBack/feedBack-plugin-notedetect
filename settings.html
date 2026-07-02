@@ -115,6 +115,26 @@
         <p class="text-[11px] text-gray-500 leading-relaxed mt-1">
             When a playlist queue has a next song, the results card counts down this long before starting it &mdash; any value you like; <code>0</code> starts the next song immediately. The card's <strong>&#9208; Stay</strong> pauses the countdown for that song, and <strong>Exit Song</strong> always leaves the playlist entirely.
         </p>
+        <label class="flex items-start gap-3 cursor-pointer select-none mt-4">
+            <input type="checkbox" id="nd-queue-show-scores" checked
+                   class="mt-0.5 rounded border-gray-600 bg-dark-700 text-accent focus:ring-accent/40">
+            <span class="text-sm text-gray-300">
+                Show each song's score card in a playlist
+                <span class="block text-[11px] text-gray-500 leading-relaxed mt-1">
+                    On by default. Off = between playlist songs you get just the <strong>Up next</strong> countdown (Play now / Stay / Exit) with no score card &mdash; scores are still recorded for the end-of-set summary.
+                </span>
+            </span>
+        </label>
+        <label class="flex items-start gap-3 cursor-pointer select-none mt-3">
+            <input type="checkbox" id="nd-queue-set-summary" checked
+                   class="mt-0.5 rounded border-gray-600 bg-dark-700 text-accent focus:ring-accent/40">
+            <span class="text-sm text-gray-300">
+                Show an end-of-set summary after the last song
+                <span class="block text-[11px] text-gray-500 leading-relaxed mt-1">
+                    On by default. After a playlist's final song: a <strong>Set Complete</strong> card with your average accuracy and a per-song list.
+                </span>
+            </span>
+        </label>
     </div>
 
     <!-- Auto-record toggle. A normal user setting (not advanced): every
@@ -1020,6 +1040,22 @@
                     queueDelayInput.value = '';
                 }
             } catch (_) {}
+        };
+    }
+
+    // Playlist display toggles, both default ON ('0' = off, anything else =
+    // on — the same convention the card's readers use). "Show scores" off
+    // collapses queued cards to the Up-Next countdown; "set summary" off
+    // skips the Set Complete card after the last song.
+    for (const [id, key] of [
+        ['nd-queue-show-scores', 'slopsmith_notedetect_queue_show_scores'],
+        ['nd-queue-set-summary', 'slopsmith_notedetect_queue_set_summary'],
+    ]) {
+        const box = _q(id);
+        if (!box) continue;
+        try { box.checked = localStorage.getItem(key) !== '0'; } catch (_) {}
+        box.onchange = () => {
+            try { localStorage.setItem(key, box.checked ? '1' : '0'); } catch (_) {}
         };
     }
 
