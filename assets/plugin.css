@@ -776,6 +776,43 @@ body:has(#v3-upnext) .nd-hud {
     padding: 0.42rem 0.7rem;
 }
 
+/* Up-Next strip (queue-aware card — playlist "Play All"). */
+.nd-sum-upnext {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 0.3rem 0.6rem;
+    margin-top: 0.9rem;
+    padding: 0.5rem 0.7rem;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 10px;
+}
+.nd-sum-upnext-meta {
+    font-size: 0.62rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    opacity: 0.65;
+}
+.nd-sum-upnext-title {
+    font-weight: 700;
+    font-size: 0.8rem;
+}
+.nd-sum-upnext-count {
+    font-size: 0.72rem;
+    opacity: 0.8;
+    font-variant-numeric: tabular-nums;
+}
+.nd-sum-upnext-btns {
+    display: flex;
+    gap: 0.4rem;
+}
+.nd-sum-upnext-btns .nd-btn {
+    flex: 0 0 auto;
+    padding: 0.35rem 0.6rem;
+    font-size: 0.68rem;
+}
+
 /* Action buttons. */
 .nd-sum-actions {
     display: flex;
