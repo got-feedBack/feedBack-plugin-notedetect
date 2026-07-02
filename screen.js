@@ -815,6 +815,13 @@ function _ndSetLogAppend(log, entry) {
     if (!entry || !Number.isFinite(entry.pos)) return log;
     const last = log.length ? log[log.length - 1] : null;
     if (!last || entry.total !== last.total || entry.pos <= last.pos) return [entry];
+    // A replay of the just-logged song re-fires the natural-end log — Retry /
+    // Practice on the FINAL queued card infers pos = prev.pos + 1 (no peekNext
+    // to anchor it), which would otherwise append a phantom entry and inflate
+    // the set. Same file as the last logged song within a set → never re-count.
+    // (Checked only in the append branch, so a genuine new run whose first song
+    // equals the previous set's last song still restarts above.)
+    if (entry.filename && entry.filename === last.filename) return log;
     return log.concat([entry]);
 }
 
@@ -15679,6 +15686,12 @@ function createNoteDetector(options = {}) {
                 </div>
             `;
             try { overlay.classList.add('nd-revealed'); } catch (e) {}
+            // We've swapped the card to the set-summary view. Drop the per-song
+            // reveal payload so a later _runDeferredSummary() (the startHidden
+            // path) can't animate the last song's accuracy/score into the
+            // summary's reused .nd-sum-acc-n / .nd-sum-score-n (which would show
+            // the wrong average). _animateSummary(overlay, null) then no-ops.
+            overlay._ndReveal = null;
             const exitBtn = overlay.querySelector('.nd-summary-close');
             if (exitBtn) exitBtn.onclick = () => {
                 _ndSetLog = [];

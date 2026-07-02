@@ -50,6 +50,30 @@ test('_ndSetLogAppend: appends in order, restarts on a new set', () => {
     assert.equal(fn(log, { total: 5 }), log);
 });
 
+test('_ndSetLogAppend: a same-file replay (Retry/Practice on the last card) never re-counts', () => {
+    const fn = extract('_ndSetLogAppend');
+    const e = (pos, total, acc, fname) => ({ pos, total, accuracy: acc,
+        filename: fname, title: 't', artist: 'a', hits: 1, misses: 0 });
+    const log = [e(0, 3, 90, 'a'), e(1, 3, 80, 'b'), e(2, 3, 70, 'c')];
+    // Retrying the FINAL song re-fires the log with an inferred pos = prev+1
+    // (no peekNext to anchor it) but the SAME file — must NOT append a phantom.
+    const retry = e(3, 3, 55, 'c');
+    assert.equal(fn(log, retry), log, 'same-file replay in the append branch is skipped');
+    // A genuinely different advancing song still appends.
+    assert.equal(fn(log, e(3, 3, 55, 'd')).length, 4);
+    // The guard lives in the append branch only: a new run whose first song
+    // equals the previous set's last song still RESTARTS (position resets to 0).
+    assert.deepEqual(fn(log, e(0, 3, 40, 'c')).map((x) => x.accuracy), [40]);
+});
+
+test('set-summary swap drops the per-song reveal payload (deferred reveal cannot overwrite it)', () => {
+    const i = SRC.indexOf("overlay.classList.add('nd-revealed')");
+    assert.ok(i !== -1, 'set-summary reveal marker present');
+    const block = SRC.slice(i, i + 500);
+    assert.match(block, /overlay\._ndReveal = null/,
+        'swapping to the set summary must null _ndReveal so _animateSummary no-ops on a later deferred reveal');
+});
+
 test('_ndSetLogAverage: empty → 0, rounds the mean', () => {
     const fn = extract('_ndSetLogAverage');
     assert.equal(fn([]), 0);
