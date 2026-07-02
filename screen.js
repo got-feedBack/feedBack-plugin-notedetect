@@ -316,7 +316,7 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // exact build that produced it. The script tag has no `import`/`fetch`
 // hook to read package.json at load time, so this is the single
 // hand-maintained constant the diagnostic path keys off of.
-const _ND_VERSION = '1.26.0';
+const _ND_VERSION = '1.27.0';
 
 // Audio processing constants
 const _ND_MIN_YIN_SAMPLES = 4096;  // enough for low E at 48kHz (need tau=585, halfLen=2048)
@@ -772,6 +772,17 @@ function _ndSaveDir() {
 function _ndAutoSaveEnabled() {
     try { return localStorage.getItem('slopsmith_notedetect_autosave_card') === '1'; }
     catch (e) { return false; }
+}
+
+// Queue auto-advance delay (seconds) between a queued song's results card and
+// the next track starting. A plain manual number (the tester ask — presets
+// felt limiting): 0 = advance immediately, anything larger counts down
+// visibly on the card. Default 10 s; settings.html writes the key.
+function _ndQueueDelaySeconds() {
+    try {
+        const v = parseFloat(localStorage.getItem('slopsmith_notedetect_queue_delay'));
+        return (Number.isFinite(v) && v >= 0) ? v : 10;
+    } catch (e) { return 10; }
 }
 
 // Personal-best store for the "beat your best" delta — one localStorage map
@@ -15540,6 +15551,21 @@ function createNoteDetector(options = {}) {
             _ndAutoExitRelease = null;
             if (release && navigateHome) { try { release(); } catch (e) {} }
         };
+        // Queue-aware Up-Next strip (playlist "Play All"): when the host's
+        // play-queue has a following track, the card names it and counts
+        // down before advancing — the score stays readable and the player
+        // keeps control (Play now / Stay). Feature-detected end to end:
+        // hosts without the queue (or peekNext), or an idle queue, render
+        // the card exactly as before.
+        const _ndQueue = (window.feedBack && window.feedBack.playQueue)
+            || (window.slopsmith && window.slopsmith.playQueue) || null;
+        const _ndQueueNext = (_ndQueue && typeof _ndQueue.active === 'function'
+            && _ndQueue.active() && typeof _ndQueue.peekNext === 'function')
+            ? _ndQueue.peekNext() : null;
+        // Filename-derived label first; upgraded to the real title async.
+        const _ndQueueNextLabel = _ndQueueNext
+            ? String(_ndQueueNext.filename).split('/').pop().replace(/\.sloppak$/i, '')
+            : '';
         // The results card is a terminal "choose your next action" screen, not a
         // throwaway popover: a stray click on the dim backdrop must NOT leave the
         // song (feedBack — "clicking outside of the card leaves the song"). Exit
@@ -15580,6 +15606,16 @@ function createNoteDetector(options = {}) {
                             title="Save the score card as a PNG">⤓ Save</button>
                 </div>
                 ${heroReasonHtml}
+                ${_ndQueueNext ? `
+                <div class="nd-sum-upnext">
+                    <span class="nd-sum-upnext-meta">Up next (${_ndQueueNext.index + 1} of ${_ndQueueNext.total})</span>
+                    <span class="nd-sum-upnext-title">${_ndEscapeHtml(_ndQueueNextLabel)}</span>
+                    <span class="nd-sum-upnext-count"></span>
+                    <span class="nd-sum-upnext-btns">
+                        <button type="button" class="nd-summary-next nd-btn nd-btn-primary">▶ Play now</button>
+                        <button type="button" class="nd-summary-stay nd-btn">⏸ Stay</button>
+                    </span>
+                </div>` : ''}
                 <div class="nd-sum-actions">
                     ${showReturnPrevBtn ? `
                     <button type="button" class="nd-summary-return-prev nd-btn">
@@ -15609,6 +15645,65 @@ function createNoteDetector(options = {}) {
         `;
         const closeBtn = overlay.querySelector('.nd-summary-close');
         if (closeBtn) closeBtn.onclick = () => _ndDismissSummary(true);
+        // Up-Next wiring. Advancing is OURS — playQueue.advance() directly,
+        // never the host's queue-aware close wrapper: we drop the auto-exit
+        // hold WITHOUT navigating (the host's generation guard makes a stale
+        // handle harmless) and remove the card first so it can't linger over
+        // the next song. Exit Song becomes a REAL exit: clearing the queue
+        // first leaves the wrapper nothing to advance to, so it returns to
+        // the menu — before this, the button labelled "Exit" silently played
+        // the next track, which is exactly the confusion the tester hit.
+        if (_ndQueueNext) {
+            const nextBtn = overlay.querySelector('.nd-summary-next');
+            const stayBtn = overlay.querySelector('.nd-summary-stay');
+            const countEl = overlay.querySelector('.nd-sum-upnext-count');
+            const titleEl = overlay.querySelector('.nd-sum-upnext-title');
+            try {
+                fetch('/api/song/' + encodeURIComponent(_ndQueueNext.filename))
+                    .then((r) => (r && r.ok ? r.json() : null))
+                    .then((m) => {
+                        if (m && m.title && titleEl && titleEl.isConnected) {
+                            titleEl.textContent = m.artist ? (m.artist + ' — ' + m.title) : m.title;
+                        }
+                    })
+                    .catch(() => {});
+            } catch (e) {}
+            let _ndAdvanceTimer = null;
+            const _ndStopCountdown = () => {
+                if (_ndAdvanceTimer) { clearInterval(_ndAdvanceTimer); _ndAdvanceTimer = null; }
+                if (countEl) countEl.textContent = '';
+                if (stayBtn) stayBtn.style.display = 'none';
+            };
+            const _ndQueueAdvance = () => {
+                _ndStopCountdown();
+                _ndAutoExitRelease = null;      // drop the hold without navigating
+                overlay.remove();
+                try { _ndQueue.advance(); } catch (e) {}
+            };
+            if (nextBtn) nextBtn.onclick = _ndQueueAdvance;
+            if (stayBtn) stayBtn.onclick = _ndStopCountdown;
+            let _ndSecsLeft = _ndQueueDelaySeconds();
+            if (_ndSecsLeft <= 0) {
+                // 0 = the user chose instant advance; defer past the current
+                // render so teardown never races the card's own setup.
+                setTimeout(_ndQueueAdvance, 0);
+            } else {
+                if (countEl) countEl.textContent = 'starting in ' + Math.ceil(_ndSecsLeft) + 's';
+                _ndAdvanceTimer = setInterval(() => {
+                    // Another path (Retry / Return to Previous / Exit) closed
+                    // the card — stop counting, never advance underneath it.
+                    if (!overlay.isConnected) { _ndStopCountdown(); return; }
+                    _ndSecsLeft -= 1;
+                    if (_ndSecsLeft <= 0) { _ndQueueAdvance(); return; }
+                    if (countEl) countEl.textContent = 'starting in ' + Math.ceil(_ndSecsLeft) + 's';
+                }, 1000);
+            }
+            if (closeBtn) closeBtn.onclick = () => {
+                _ndStopCountdown();
+                try { _ndQueue.clear(); } catch (e) {}
+                _ndDismissSummary(true);
+            };
+        }
         // Album-art thumbnail: drop it (and collapse the gap) if the song has
         // no art — the endpoint 404s and we don't want a broken-image glyph.
         const artImgEl = overlay.querySelector('.nd-sum-art');
