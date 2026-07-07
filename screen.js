@@ -785,6 +785,16 @@ function _ndQueueDelaySeconds() {
     } catch (e) { return 10; }
 }
 
+// Auto-drill threshold: jump into a drill loop after this many CONTIGUOUS missed
+// notes while playing (0 = off, the default). settings.html writes the key;
+// screen.js caches it at enable()/resetScoring and evaluates it on each miss.
+function _ndAutoDrillMissesSetting() {
+    try {
+        const v = parseInt(localStorage.getItem('slopsmith_notedetect_autodrill_misses'), 10);
+        return (Number.isFinite(v) && v > 0) ? v : 0;
+    } catch (e) { return 0; }
+}
+
 // Playlist-queue display toggles (both default ON; settings.html writes the
 // keys). "Show scores" off collapses a queued song's card to just the
 // Up-Next countdown — advance on the countdown alone; the set still logs
@@ -1807,6 +1817,25 @@ function _ndDrillRampDecision(score, goal, rung, ladderLength, topClears = 0, re
     return { action: 'advance', nextRung: rung + 1 };
 }
 
+// Auto-drill trigger. While learning a song there's no usable per-note feedback
+// mid-play, and waiting for the post-play summary costs a whole run — so instead
+// jump straight into a drill loop the moment the player fluffs a RUN of notes.
+// Returns true when the contiguous-miss streak has reached the (configurable)
+// threshold and a fresh drill may start. Pure → node-testable.
+function _ndAutoDrillShouldTrigger(missStreak, threshold, drilling, playing) {
+    return threshold > 0 && !drilling && !!playing && missStreak >= threshold;
+}
+
+// The loop range for an auto-triggered drill: the chart-time span of the missed
+// run, widened to a floor so the conductor's min-length + lead-in guards accept
+// it (a tight cluster of fast notes can span < 0.5 s). Pure → node-testable.
+function _ndAutoDrillRange(firstMissT, lastMissT, minSpanSec = 1.5) {
+    const start = Math.max(0, Number(firstMissT));
+    const rawEnd = Number(lastMissT);
+    const end = Math.max(Number.isFinite(rawEnd) ? rawEnd : start, start + minSpanSec);
+    return { start, end };
+}
+
 // Describe HOW a missed note failed, from its judgment. Pure → testable.
 // `how` is a short category (for colour-coding); `detail` is the human
 // phrase shown per note in the drill HUD.
@@ -2449,6 +2478,13 @@ function createNoteDetector(options = {}) {
             // (older build, manual edit) can't put scoring in a state the
             // UI can't represent.
             if (s.chordHitRatio !== undefined) chordHitRatio = Math.max(0.25, Math.min(1, s.chordHitRatio));
+            // Auto-drill threshold (contiguous misses → drill; 0 = off). Also
+            // persisted to localStorage by settings.html; accept it here so a
+            // host/test can drive it programmatically.
+            if (s.autoDrillMisses !== undefined) {
+                const n = parseInt(s.autoDrillMisses, 10);
+                _autoDrillMisses = (Number.isFinite(n) && n > 0) ? n : 0;
+            }
             // Detection confidence floor — clamp to a sensible range.
             // Below 0.05, even pure noise becomes a "detection"; above
             // 0.50, even confident YIN/CREPE frames get rejected on
@@ -2927,6 +2963,17 @@ function createNoteDetector(options = {}) {
     const _CLICK_LOOKAHEAD_S = 0.12;        // chart-seconds to schedule ahead (covers the 33ms HUD tick)
     const _ndPerfNow = () => (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     const _ndMmSs = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+
+    // Auto-drill (jump into a drill loop mid-song after a run of misses). See
+    // _ndAutoDrillShouldTrigger. `_autoDrillMisses` is the threshold (0 = off),
+    // cached from settings at enable()/resetScoring; the streak + first/last
+    // times track the current contiguous-miss run; the cooldown stops an
+    // immediate re-fire right after one drill is triggered.
+    let _autoDrillMisses = _ndAutoDrillMissesSetting();
+    let _autoDrillMissStreak = 0;
+    let _autoDrillFirstMissT = NaN;
+    let _autoDrillLastMissT = NaN;
+    let _autoDrillCooldownUntil = 0;
 
     // Detection state
     let detectedMidi = -1;
@@ -5083,6 +5130,8 @@ function createNoteDetector(options = {}) {
                     dispatchFx({ fxType: 'milestone', streak, mult: multiplier });
                 }
                 updateSectionStat('hit');
+                // A hit breaks the contiguous-miss run the auto-drill watches.
+                _autoDrillMissStreak = 0;
             } else {
                 const lostStreak = streak;
                 misses++;
@@ -5094,6 +5143,15 @@ function createNoteDetector(options = {}) {
                 }
                 multiplier = 1;
                 updateSectionStat('miss');
+                // Grow the contiguous-miss run and, at the threshold, drop into a
+                // drill on the fluffed passage (auto-drill). Track the run's
+                // chart-time span so the drill targets exactly those notes.
+                _autoDrillMissStreak++;
+                if (Number.isFinite(judgment.noteTime)) {
+                    if (_autoDrillMissStreak === 1) _autoDrillFirstMissT = judgment.noteTime;
+                    _autoDrillLastMissT = judgment.noteTime;
+                }
+                _maybeAutoDrill();
             }
             // Mirror to drill counters. Independent state — global
             // session score is unaffected by iteration boundaries.
@@ -11722,6 +11780,12 @@ function createNoteDetector(options = {}) {
         _susActiveUntil.clear();
         _chordLastResult.clear();
         _ndLastMissScanT = null;
+        // Auto-drill: clear the contiguous-miss run and re-read the threshold
+        // from settings (resetScoring runs on every song switch / detect toggle).
+        _autoDrillMisses = _ndAutoDrillMissesSetting();
+        _autoDrillMissStreak = 0;
+        _autoDrillFirstMissT = NaN;
+        _autoDrillLastMissT = NaN;
         _ndVerifierRejects.length = 0;
         _ndRejectDedup.clear();
         _ndVerifyFailSnap.clear();
@@ -11895,6 +11959,33 @@ function createNoteDetector(options = {}) {
         return false;
     }
 
+    // Called from recordJudgment() on every conceded miss. When the contiguous-
+    // miss streak reaches the configured threshold, drop the player straight into
+    // a drill loop on the run they just fluffed — no need to finish the song and
+    // read the post-play summary. Fires the drill OFF the scoring hot path (this
+    // runs inside checkMisses/matchNotes) via a microtask, and cools down so one
+    // bad run doesn't immediately re-trigger.
+    function _maybeAutoDrill() {
+        const playing = !!(window.slopsmith && window.slopsmith.isPlaying);
+        if (!_ndAutoDrillShouldTrigger(_autoDrillMissStreak, _autoDrillMisses, drillConductorActive, playing)) return;
+        if (_ndPerfNow() < _autoDrillCooldownUntil) return;
+        const first = _autoDrillFirstMissT;
+        const last = _autoDrillLastMissT;
+        const n = _autoDrillMissStreak;
+        _autoDrillMissStreak = 0;                       // consume the run
+        _autoDrillCooldownUntil = _ndPerfNow() + 4000;  // ~4 s guard against re-fire
+        Promise.resolve().then(() => {
+            try {
+                if (Number.isFinite(first) && Number.isFinite(last)) {
+                    const { start, end } = _ndAutoDrillRange(first, last);
+                    startDrill(start, end, { expandContext: true, label: 'Missed run', focus: `${n} missed in a row` });
+                } else {
+                    startDrillHere(null, { expandContext: true, label: 'Missed run' });
+                }
+            } catch (_) { /* a failed auto-drill is a no-op; play continues */ }
+        });
+    }
+
     async function startDrill(startSec, endSec, opts = {}) {
         const {
             label = null,
@@ -11947,6 +12038,11 @@ function createNoteDetector(options = {}) {
         // races in mid-setup sees an active drill.
         drillConductorSavedSpeed = _hostGetSpeed();
         drillConductorActive = true;
+        // Starting a drill consumes the contiguous-miss run — the misses inside
+        // the drill loop must not accumulate toward another auto-drill trigger.
+        _autoDrillMissStreak = 0;
+        _autoDrillFirstMissT = NaN;
+        _autoDrillLastMissT = NaN;
         drillConductorLadder = ladder;
         drillConductorRung = 0;
         drillConductorGoal = Number.isFinite(goal) ? Math.max(0, Math.min(1, goal)) : _ND_DRILL_DEFAULT_GOAL;
@@ -12337,6 +12433,13 @@ function createNoteDetector(options = {}) {
     function endDrill(reason = 'user') {
         if (!drillConductorActive) return;
         drillConductorActive = false;
+        // Misses scored inside the drill loop grew the contiguous-miss run;
+        // clear it (and start a cooldown) so returning to the song doesn't
+        // instantly auto-drill again on the next miss.
+        _autoDrillMissStreak = 0;
+        _autoDrillFirstMissT = NaN;
+        _autoDrillLastMissT = NaN;
+        _autoDrillCooldownUntil = _ndPerfNow() + 4000;
         const graduated = reason === 'graduated';
         const label = drillConductorLabel;
         const best = drillConductorBest;
@@ -17525,6 +17628,10 @@ function createNoteDetector(options = {}) {
                     chordTimingHitThreshold = Math.max(timingHitThreshold, Math.min(timingTolerance, s.chordTimingHitThreshold));
                 }
                 if (Number.isFinite(s.chordHitRatio))       chordHitRatio       = s.chordHitRatio;
+                if (s.autoDrillMisses !== undefined) {
+                    const _adn = parseInt(s.autoDrillMisses, 10);
+                    _autoDrillMisses = (Number.isFinite(_adn) && _adn > 0) ? _adn : 0;
+                }
                 if (Number.isFinite(s.latencyOffset))       latencyOffset       = s.latencyOffset;
                 if (Number.isFinite(s.inputGain))           inputGain           = s.inputGain;
                 if (Number.isFinite(s.engineInputGain))     engineInputGain     = Math.max(0.1, Math.min(5, s.engineInputGain));

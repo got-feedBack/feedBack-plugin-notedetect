@@ -115,6 +115,12 @@
         <p class="text-[11px] text-gray-500 leading-relaxed mt-1">
             When a playlist queue has a next song, the results card counts down this long before starting it &mdash; any value you like; <code>0</code> starts the next song immediately. The card's <strong>&#9208; Stay</strong> pauses the countdown for that song, and <strong>Exit Song</strong> always leaves the playlist entirely.
         </p>
+        <label for="nd-autodrill-misses" class="block text-xs text-gray-300 mb-1 mt-4">Auto-drill after N missed notes in a row</label>
+        <input type="number" id="nd-autodrill-misses" min="0" step="1" placeholder="0"
+               class="w-32 bg-dark-700 border border-gray-600 rounded-lg px-3 py-2 text-sm text-gray-200 focus:ring-accent/40 focus:border-accent">
+        <p class="text-[11px] text-gray-500 leading-relaxed mt-1">
+            While learning a song, drop straight into a slow-down drill loop the moment you miss this many notes in a row &mdash; no need to finish the run and read the summary. <code>0</code> = off. The drill targets the passage you just fluffed, starts slow, and speeds up as you nail it; a hit anywhere resets the counter.
+        </p>
         <label class="flex items-start gap-3 cursor-pointer select-none mt-4">
             <input type="checkbox" id="nd-queue-show-scores" checked
                    class="mt-0.5 rounded border-gray-600 bg-dark-700 text-accent focus:ring-accent/40">
@@ -1038,6 +1044,28 @@
                 } else {
                     localStorage.removeItem('slopsmith_notedetect_queue_delay');
                     queueDelayInput.value = '';
+                }
+            } catch (_) {}
+        };
+    }
+
+    // Auto-drill: contiguous missed notes before dropping into a drill loop
+    // (0 / blank = off). screen.js reads slopsmith_notedetect_autodrill_misses
+    // via _ndAutoDrillMissesSetting(), refreshed each song in resetScoring().
+    const autoDrillInput = _q('nd-autodrill-misses');
+    if (autoDrillInput) {
+        try {
+            const v = localStorage.getItem('slopsmith_notedetect_autodrill_misses');
+            if (v !== null && v !== '') autoDrillInput.value = v;
+        } catch (_) {}
+        autoDrillInput.onchange = () => {
+            try {
+                const n = parseInt(autoDrillInput.value, 10);
+                if (Number.isFinite(n) && n > 0) {
+                    localStorage.setItem('slopsmith_notedetect_autodrill_misses', String(n));
+                } else {
+                    localStorage.removeItem('slopsmith_notedetect_autodrill_misses');
+                    autoDrillInput.value = '';
                 }
             } catch (_) {}
         };
