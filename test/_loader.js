@@ -312,6 +312,8 @@ function loadDetectionCore({ sandboxBeforeRun } = {}) {
         multiplierForStreak: sandbox._ndMultiplierForStreak,
         isStreakMilestone: sandbox._ndIsStreakMilestone,
         gradeFor: sandbox._ndGradeFor,
+        // Drill conductor pure decision fn (ported from slopsmith 1.39.1).
+        drillRampDecision: sandbox._ndDrillRampDecision,
         computeBestDelta: sandbox._ndComputeBestDelta,
         pickHeroAction: sandbox._ndPickHeroAction,
         // Results-card share helpers (pure — image/clipboard paths are
