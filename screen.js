@@ -11668,22 +11668,13 @@ function createNoteDetector(options = {}) {
         if (closeBtn && closeBtn.parentNode === controls) controls.insertBefore(gearBtn, closeBtn);
         else controls.appendChild(gearBtn);
 
-        // Center-anchored drill entry: point the playhead at the hard bit,
-        // click, and the conductor windows the bar under it and adapts outward
-        // as it's earned. Ported from slopsmith 1.39.1.
-        const drillHereBtn = document.createElement('button');
-        drillHereBtn.className = 'nd-drill-here-btn px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-500 transition';
-        drillHereBtn.textContent = '🎯 Drill here';
-        drillHereBtn.title = 'Drill the passage around the playhead — slows down, then widens the practice region as you nail it';
-        drillHereBtn.onclick = () => {
-            drillHereBtn.textContent = '🎯 …';
-            Promise.resolve(startDrillHere()).then((ok) => {
-                drillHereBtn.textContent = ok ? '🎯 Drilling' : '🎯 (need a song)';
-                setTimeout(() => { drillHereBtn.textContent = '🎯 Drill here'; }, ok ? 1200 : 1500);
-            }).catch(() => { drillHereBtn.textContent = '🎯 Drill here'; });
-        };
-        if (closeBtn && closeBtn.parentNode === controls) controls.insertBefore(drillHereBtn, closeBtn);
-        else controls.appendChild(drillHereBtn);
+        // NOTE: no standalone "Drill here" button here on purpose. The drill
+        // conductor is a headless engine driven through feedBack's existing UI
+        // (the coaching plugin's post-play "Drill this run" / "Practice this"
+        // buttons call window.noteDetect.startDrill). A note_detect-owned button
+        // would duplicate that entry point and upstream's Section Practice. The
+        // startDrillHere() API stays exported for any host UI that wants a
+        // "drill the bar under the playhead" affordance.
 
         attachInstanceRoot();
         // Sync button class/text with current state. If the instance
