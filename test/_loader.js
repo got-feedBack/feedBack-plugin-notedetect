@@ -312,6 +312,8 @@ function loadDetectionCore({ sandboxBeforeRun } = {}) {
         multiplierForStreak: sandbox._ndMultiplierForStreak,
         isStreakMilestone: sandbox._ndIsStreakMilestone,
         gradeFor: sandbox._ndGradeFor,
+        // Clean/loose hit grade (ported from slopsmith 1.39.1).
+        gradeClean: sandbox._ndGradeClean,
         computeBestDelta: sandbox._ndComputeBestDelta,
         pickHeroAction: sandbox._ndPickHeroAction,
         // Results-card share helpers (pure — image/clipboard paths are

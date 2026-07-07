@@ -1238,6 +1238,25 @@ async function _ndShareCardClick(btn, action, data, overlayEl) {
     setTimeout(() => { if (btn.isConnected) { btn.textContent = orig; btn.disabled = false; } }, 1600);
 }
 
+// A HIT is binary — a note 95 ms late still lands inside a 150 ms window and
+// counts identical to a dead-on hit, which inflates scores and produces false
+// "you passed" verdicts. `clean` is the tighter grade the coach keys off of to
+// surface "technically hit but loose" spots WITHOUT reclassifying them as
+// misses (which would resurrect the bass low-string false-misses the wide
+// windows were widened to avoid). The clean thresholds are always <= the hit
+// thresholds (clamped on load), so the clean band lives strictly inside the hit
+// window. `looseReason` names the offending axis so the coach can label the
+// drill (tight timing vs intonation).
+function _ndGradeClean(hit, timingError, pitchError, cleanTimingMs, cleanPitchCents) {
+    if (!hit) return { clean: false, looseReason: null };
+    const tLoose = Number.isFinite(timingError) && Number.isFinite(cleanTimingMs)
+        && Math.abs(timingError) > cleanTimingMs;
+    const pLoose = Number.isFinite(pitchError) && Number.isFinite(cleanPitchCents)
+        && Math.abs(pitchError) > cleanPitchCents;
+    if (!tLoose && !pLoose) return { clean: true, looseReason: null };
+    return { clean: false, looseReason: (tLoose && pLoose) ? 'both' : (tLoose ? 'timing' : 'pitch') };
+}
+
 function _ndMakeJudgment(opts) {
     const o = opts || {};
     const matched = !!o.matched;
@@ -1288,12 +1307,23 @@ function _ndMakeJudgment(opts) {
     const hit = isChord
         ? (matched && timingState === 'OK')
         : (timingState === 'OK' && (pitchState === 'OK' || pitchState === null));
+    // Tighter quality grade inside the hit window — defaults to the hit
+    // thresholds (so a caller that doesn't pass clean thresholds sees every
+    // hit as clean → no behaviour change). Real call sites pass the stricter
+    // clean thresholds. Pitch grade is skipped for chords (pitchError is a
+    // single-string sample there; the chord scorer already gated the hit).
+    const cleanTimingMs = Number.isFinite(o.cleanTimingThresholdMs) ? o.cleanTimingThresholdMs : timingThresholdMs;
+    const cleanPitchCents = Number.isFinite(o.cleanPitchThresholdCents) ? o.cleanPitchThresholdCents : pitchThresholdCents;
+    const { clean, looseReason } = _ndGradeClean(
+        hit, timingError, isChord ? null : pitchError, cleanTimingMs, cleanPitchCents);
     return {
         chartNote: o.chartNote || o.note || null,
         note: o.note || null,
         notes: o.notes || null,
         chord: !!o.chord,
         hit,
+        clean,
+        looseReason,
         timingState,
         timingError,
         pitchState,
@@ -2224,6 +2254,10 @@ function createNoteDetector(options = {}) {
     // than single notes.
     let chordTimingHitThreshold = 0.150;
     let pitchHitThreshold = 20;
+    // Clean-grade thresholds — always <= the hit thresholds (clamped on load),
+    // so the clean band lives strictly inside the hit window. See _ndGradeClean.
+    let cleanTimingThreshold = 0.050;   // 50 ms
+    let cleanPitchThreshold = 12;       // cents
     let showTimingErrors = true;
     let showPitchErrors = true;
     // slopsmith#254 — the full-screen green/red edge flash on hit/miss.
@@ -2341,6 +2375,11 @@ function createNoteDetector(options = {}) {
             // candidate window, not pushing past it).
             if (s.chordTimingHitThreshold !== undefined) chordTimingHitThreshold = Math.max(timingHitThreshold, Math.min(timingTolerance, s.chordTimingHitThreshold));
             if (s.pitchHitThreshold !== undefined) pitchHitThreshold = Math.max(5, Math.min(pitchTolerance, s.pitchHitThreshold));
+            if (s.cleanTimingThreshold !== undefined) cleanTimingThreshold = Math.max(0.01, Math.min(timingHitThreshold, s.cleanTimingThreshold));
+            if (s.cleanPitchThreshold !== undefined) cleanPitchThreshold = Math.max(1, Math.min(pitchHitThreshold, s.cleanPitchThreshold));
+            // Clean thresholds live strictly inside the hit window.
+            if (cleanTimingThreshold > timingHitThreshold) cleanTimingThreshold = timingHitThreshold;
+            if (cleanPitchThreshold > pitchHitThreshold)   cleanPitchThreshold = pitchHitThreshold;
             if (s.showTimingErrors !== undefined) showTimingErrors = !!s.showTimingErrors;
             if (s.showPitchErrors !== undefined) showPitchErrors = !!s.showPitchErrors;
             if (s.edgeFlash !== undefined) edgeFlashEnabled = !!s.edgeFlash;
@@ -2562,6 +2601,9 @@ function createNoteDetector(options = {}) {
     };
     const _diagSingles = { hits: 0, misses: 0 };
     const _diagChords  = { hits: 0, misses: 0 };
+    // Clean vs loose HITS — a low clean_rate next to high accuracy means
+    // sloppy-but-technically-hit (the honest-pass signal).
+    const _diagClean = { clean: 0, loose: 0 };
     // Per-string. 8 covers 4/5/6/7/8-string arrangements without resizing.
     const _diagPerString = Array.from({ length: 8 }, () => ({ hits: 0, misses: 0 }));
     // Signed errors for matched judgments (excludes pure misses where no
@@ -4713,6 +4755,8 @@ function createNoteDetector(options = {}) {
             // hit is not gated on a moving target.
             pitchThresholdCents: Number.isFinite(extra.pitchThresholdCents)
                 ? extra.pitchThresholdCents : pitchHitThreshold,
+            cleanTimingThresholdMs: cleanTimingThreshold * 1000,
+            cleanPitchThresholdCents: cleanPitchThreshold,
             hitStrings: extra.hitStrings,
             totalStrings: extra.totalStrings,
             score: extra.score,
@@ -4772,6 +4816,7 @@ function createNoteDetector(options = {}) {
         const isChord = !!judgment.chord;
         if (judgment.hit) {
             (isChord ? _diagChords : _diagSingles).hits++;
+            if (judgment.clean === false) _diagClean.loose++; else _diagClean.clean++;
         } else {
             (isChord ? _diagChords : _diagSingles).misses++;
             if (isChord) {
@@ -4829,6 +4874,8 @@ function createNoteDetector(options = {}) {
             f:   Number.isInteger(nn.f) ? nn.f : null,
             sus: Number.isFinite(nn.sus) ? +(+nn.sus).toFixed(3) : 0,
             hit:   !!judgment.hit,
+            clean: !!judgment.clean,
+            lr:  judgment.looseReason || undefined,   // 'timing' | 'pitch' | 'both' on a loose hit
             chord: !!judgment.chord,
             ts:  judgment.timingState || null,
             ps:  judgment.pitchState  || null,
@@ -4902,6 +4949,7 @@ function createNoteDetector(options = {}) {
         for (const k of Object.keys(_diagBreakdown)) _diagBreakdown[k] = 0;
         _diagSingles.hits = 0; _diagSingles.misses = 0;
         _diagChords.hits  = 0; _diagChords.misses  = 0;
+        _diagClean.clean = 0; _diagClean.loose = 0;
         for (const slot of _diagPerString) { slot.hits = 0; slot.misses = 0; }
         _diagTimingErrors.length = 0;
         _diagTimingErrorsHits.length = 0;
@@ -13618,6 +13666,11 @@ function createNoteDetector(options = {}) {
                 best_streak: bestStreak,
                 singles: { hits: _diagSingles.hits, misses: _diagSingles.misses, accuracy: sAcc },
                 chords:  { hits: _diagChords.hits,  misses: _diagChords.misses,  accuracy: cAcc },
+                // Clean vs loose hit split — low clean_rate next to high
+                // accuracy = sloppy-but-technically-hit.
+                clean_hits: _diagClean.clean,
+                loose_hits: _diagClean.loose,
+                clean_rate: hits > 0 ? +(_diagClean.clean / hits).toFixed(3) : null,
             },
             miss_breakdown: { ..._diagBreakdown },
             per_string: _diagPerString.map((slot, s) => ({
@@ -16705,6 +16758,8 @@ function createNoteDetector(options = {}) {
                 if (Number.isFinite(s.pitchHitThreshold))   pitchHitThreshold   = s.pitchHitThreshold;
                 if (Number.isFinite(s.timingTolerance))     timingTolerance     = s.timingTolerance;
                 if (Number.isFinite(s.timingHitThreshold))  timingHitThreshold  = s.timingHitThreshold;
+                if (Number.isFinite(s.cleanTimingThreshold)) cleanTimingThreshold = s.cleanTimingThreshold;
+                if (Number.isFinite(s.cleanPitchThreshold))  cleanPitchThreshold  = s.cleanPitchThreshold;
                 if (Number.isFinite(s.chordTimingHitThreshold)) {
                     // Clamp here too — _harness is a Node-only entrypoint
                     // (harness.js + regression.js drive scoring through it)
@@ -16728,6 +16783,9 @@ function createNoteDetector(options = {}) {
                 if (timingHitThreshold > timingTolerance) timingHitThreshold = timingTolerance;
                 if (chordTimingHitThreshold < timingHitThreshold) chordTimingHitThreshold = timingHitThreshold;
                 if (chordTimingHitThreshold > timingTolerance)    chordTimingHitThreshold = timingTolerance;
+                // Clean thresholds live strictly inside the hit window.
+                if (cleanTimingThreshold > timingHitThreshold) cleanTimingThreshold = timingHitThreshold;
+                if (cleanPitchThreshold > pitchHitThreshold)   cleanPitchThreshold = pitchHitThreshold;
             },
         },
     };
