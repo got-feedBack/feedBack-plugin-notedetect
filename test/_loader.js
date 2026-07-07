@@ -314,6 +314,8 @@ function loadDetectionCore({ sandboxBeforeRun } = {}) {
         gradeFor: sandbox._ndGradeFor,
         // Drill conductor pure decision fn (ported from slopsmith 1.39.1).
         drillRampDecision: sandbox._ndDrillRampDecision,
+        // Backward-seek re-open decision (ported from slopsmith 1.39.1).
+        keysToReopenOnSeek: sandbox._ndKeysToReopenOnSeek,
         computeBestDelta: sandbox._ndComputeBestDelta,
         pickHeroAction: sandbox._ndPickHeroAction,
         // Results-card share helpers (pure — image/clipboard paths are

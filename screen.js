@@ -1906,6 +1906,24 @@ function _ndConstraintCheckString(
     return { hit: centsDiff <= pitchCheckCents, bandEnergy, centsDiff, centsError };
 }
 
+// Which already-judged note keys to RE-OPEN when the playhead jumps backward
+// (a seek-back / drill-loop restart), so a replayed section re-scores instead
+// of keeping its stale first-pass verdict. Pure → testable. `keys` are
+// noteResults keys of the form "<chartTime>_<s>_<f>". Returns [] unless this is
+// a genuine backward jump (> 0.25s, past normal frame jitter / pause); then
+// returns every key whose chart time is at/after the new playhead (minus the
+// timing window).
+function _ndKeysToReopenOnSeek(lastT, t, tolerance, keys) {
+    if (!Number.isFinite(lastT) || !(t < lastT - 0.25)) return [];
+    const floor = t - (Number.isFinite(tolerance) ? tolerance : 0);
+    const out = [];
+    for (const key of keys) {
+        const nt = parseFloat(String(key).split('_')[0]);
+        if (Number.isFinite(nt) && nt >= floor) out.push(key);
+    }
+    return out;
+}
+
 // Score a chord by checking each of its constituent notes against their
 // respective string frequency bands. Returns { score, hitStrings, totalStrings }.
 //
@@ -2810,6 +2828,11 @@ function createNoteDetector(options = {}) {
     // ~30 fps pitch frames and 60 fps highway render so the lit-gem glow
     // doesn't flicker. Pruned alongside noteResults; cleared on reset.
     const _susActiveUntil = new Map();
+
+    // Last playhead checkMisses() saw — for spotting a backward seek (drill A-B
+    // loop wrap or manual seek-back) on the browser path so the replayed
+    // section re-scores. null = no scan yet (startup / post-reset).
+    let _ndLastMissScanT = null;
 
     // Drill mode (slopsmith plugin-API: loop:restart event from #198).
     // Activates whenever slopsmith has an A-B loop set; each loop wrap
@@ -5796,6 +5819,18 @@ function createNoteDetector(options = {}) {
         const avOffsetSec = (hw.getAvOffset ? hw.getAvOffset() / 1000 : 0);
         const t = hw.getTime() + avOffsetSec - latencyOffset;
         const tolerance = timingTolerance;
+        // Backward seek / restart: the playhead jumped back, so the user is
+        // replaying a section (flubbed the intro, backed up, played it clean) or
+        // a drill A-B loop wrapped. Re-open every note at/after the new playhead
+        // — otherwise the first pass's verdicts stick and the replay never
+        // re-scores (the note stays a hotspot the second time through). Seeking
+        // back to the start clears everything → a clean fresh attempt. Decision
+        // is the pure, tested _ndKeysToReopenOnSeek.
+        for (const key of _ndKeysToReopenOnSeek(_ndLastMissScanT, t, tolerance, noteResults.keys())) {
+            noteResults.delete(key);
+            _susActiveUntil.delete(key);
+        }
+        _ndLastMissScanT = t;
         const missDeadline = t - tolerance * 2;
         // Mirror matchNotes' sus-late-grace policy. Without this, a sus
         // note whose match window matchNotes is willing to extend gets
@@ -11695,6 +11730,7 @@ function createNoteDetector(options = {}) {
         _scoreLedger.clear();
         _susActiveUntil.clear();
         _chordLastResult.clear();
+        _ndLastMissScanT = null;
         _ndVerifierRejects.length = 0;
         _ndRejectDedup.clear();
         _ndVerifyFailSnap.clear();
