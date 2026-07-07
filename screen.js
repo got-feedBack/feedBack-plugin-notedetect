@@ -329,6 +329,10 @@ const _ND_HARMONIC_FALLBACK_RATIOS = [1, 2, 3, 4, 5];
 const _ND_HARMONIC_FALLBACK_HALF_CENTS = 80; // ±half-window around each harmonic (≈1.5 coarse low bins)
 const _ND_HARMONIC_FALLBACK_PEAK_FRAC = 0.40; // each counted harmonic ≥ this fraction of the band peak
 const _ND_HARMONIC_FALLBACK_MIN_HARMONICS = 3; // need this many coherent harmonics to accept
+// Post-miss PRESENCE check (coaching fault attribution, not hit/miss): how many
+// coherent harmonics of the expected note must appear for us to say the player
+// DID play it (so the miss is a detector blind-spot, not a no-play).
+const _ND_PRESENCE_MIN_COMB = 2;
 
 // Audio processing constants
 const _ND_MIN_YIN_SAMPLES = 4096;  // enough for low E at 48kHz (need tau=585, halfLen=2048)
@@ -1898,6 +1902,42 @@ function _ndHarmonicCombCount(magnitudes, binHz, expectedHz, bandPeakMag) {
         }
     }
     return coherent;
+}
+
+// Mute-fail check for a conceded miss: did the OPEN string ring in place of the
+// charted FRETTED note? (You fingered the wrong fret or failed to fret/mute, so
+// the open string sounded instead.) A genuinely valid reason to miss — distinct
+// from "played nothing" (no comb anywhere) and "detector dropped a note you
+// played" (the fretted comb IS present). Returns true only for a fretted note
+// whose open-string comb is clearly present AND stronger than the fretted comb.
+function _ndDetectMuteFail(magnitudes, binHz, expectedHz, openHz, bandPeakMag) {
+    if (!(openHz > 0) || !(expectedHz > 0)) return false;
+    // Open note and fretted note must be meaningfully different pitches.
+    if (Math.abs(1200 * Math.log2(expectedHz / openHz)) < 120) return false;
+    const openComb = _ndHarmonicCombCount(magnitudes, binHz, openHz, bandPeakMag);
+    if (openComb < _ND_HARMONIC_FALLBACK_MIN_HARMONICS) return false;
+    const frettedComb = _ndHarmonicCombCount(magnitudes, binHz, expectedHz, bandPeakMag);
+    return openComb > frettedComb;
+}
+
+// Was the input SILENT across a ±halfWin window around centerT (visual/song
+// time)? Peak level below `threshold` = silence (player stopped / didn't play),
+// vs the low-string blind spot (string ringing, pitch unresolved). Returns
+// true/false, or null when there's no level telemetry in the window.
+function _ndIsSilentWindow(samples, centerT, halfWin, threshold) {
+    if (!Array.isArray(samples) || samples.length === 0) return null;
+    let peak = 0;
+    let inWindow = 0;
+    for (let i = samples.length - 1; i >= 0; i--) {
+        const s = samples[i];
+        if (!s) continue;
+        if (s.songT > centerT + halfWin) continue;
+        if (s.songT < centerT - halfWin) break;
+        inWindow++;
+        if (s.level > peak) peak = s.level;
+    }
+    if (inWindow === 0) return null;
+    return peak < threshold;
 }
 
 // Score a chord by checking each of its constituent notes against their
@@ -4421,6 +4461,27 @@ function createNoteDetector(options = {}) {
             _rescueBuf = nb;
             if (hw && hw.getTime) _rescueBufEndT = hw.getTime();
         }
+        // Record the per-frame input level into the level-history time series so
+        // the silence gate ("was the player silent here") works on the BROWSER
+        // path too (it was desktop-only — fed from the engine's level callback).
+        // Without this, a stretch where the player stopped playing is
+        // indistinguishable from a low-bass detection gap downstream. Same rms*5
+        // scaling + 0.02 threshold the desktop path uses; skip on the bridge
+        // path (its level callback already records). Pruning / backward-jump
+        // reset mirror the desktop block.
+        if (!usingDesktopBridge && buffer && buffer.length && hw && typeof hw.getTime === 'function') {
+            let sum = 0;
+            for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i];
+            const lvl = Math.min(1, Math.max(0, Math.sqrt(sum / buffer.length) * 5));
+            const avO = (hw.getAvOffset ? hw.getAvOffset() / 1000 : 0);
+            const songT = hw.getTime() + avO;
+            const last = _ndLevelSamples.length ? _ndLevelSamples[_ndLevelSamples.length - 1].songT : -Infinity;
+            if (songT < last - 0.05) _ndLevelSamples.length = 0;   // seek / drill-wrap → reset
+            _ndLevelSamples.push({ songT, level: lvl });
+            const cutoff = songT - _ND_LEVEL_HISTORY_S;
+            while (_ndLevelSamples.length > 0 && _ndLevelSamples[0].songT < cutoff) _ndLevelSamples.shift();
+            while (_ndLevelSamples.length > 240) _ndLevelSamples.shift();
+        }
         let result;
         let detectorUsed;
         // Capture the session generation at frame start. disable()
@@ -4867,6 +4928,64 @@ function createNoteDetector(options = {}) {
         return makeMatchedJudgment(cn, noteTime, noteTime, expectedMidi, detMidi, 1, { pitchError: 0, rescued: true });
     }
 
+    // Single-FFT miss analysis for a CONCEDED bass miss: read the 16384-pt
+    // rescue window ONCE and derive all three coaching signals — per-string
+    // energy (wrong-string / ambient), mute-fail (open string rang instead of
+    // the fretted note), and note-presence (the expected note's harmonic comb
+    // is there → the player DID play it, the detector just dropped it). Firing
+    // three separate 16384-pt FFTs per miss starved the render loop (the
+    // highway-stutter regression), so they share one FFT. Bass only.
+    function _missAnalysisAtNote(chartNote, noteTime) {
+        const blank = { stringEnergy: null, muteFail: false, presenceComb: 0 };
+        if (currentArrangement !== 'bass' || _rescueBuf.length < _RESCUE_WIN) return blank;
+        const sr = audioCtx ? audioCtx.sampleRate : bridgeSampleRate;
+        if (!(sr > 0)) return blank;
+        const avOffsetSec = (hw.getAvOffset ? hw.getAvOffset() / 1000 : 0);
+        const noteHwTime = noteTime - avOffsetSec + latencyOffset;
+        const samplesBack = Math.round((_rescueBufEndT - noteHwTime) * sr);
+        const center = _rescueBuf.length - samplesBack;
+        const start = center - (_RESCUE_WIN >> 1);
+        if (start < 0 || start + _RESCUE_WIN > _rescueBuf.length) return blank;
+        const win = _rescueBuf.subarray(start, start + _RESCUE_WIN);
+        try {
+            const { magnitudes, binHz } = _ndFftMagnitude(win, sr);   // the ONE FFT
+            const total = _ndTotalEnergy(magnitudes);
+            // Per-string energy — the wrong-string / ambient signal on a miss.
+            const stringEnergy = new Array(currentStringCount);
+            for (let s = 0; s < currentStringCount; s++) {
+                const [lo, hi] = _ndStringBandHz(s, currentArrangement, currentStringCount, tuningOffsets, capo);
+                stringEnergy[s] = Math.round(_ndBandEnergy(magnitudes, binHz, lo, hi, total) * 1000) / 1000;
+            }
+            // Charted string's expected pitch + band peak — shared by both checks.
+            const expectedMidi = _ndMidiFromStringFret(chartNote.s, chartNote.f, currentArrangement, currentStringCount, tuningOffsets, capo);
+            const expHz = 440 * Math.pow(2, (expectedMidi - 69) / 12);
+            const [loHz, hiHz] = _ndStringBandHz(chartNote.s, currentArrangement, currentStringCount, tuningOffsets, capo);
+            const loBin = Math.max(0, Math.floor(loHz / binHz));
+            const hiBin = Math.min(magnitudes.length - 1, Math.ceil(hiHz / binHz));
+            let bandPk = 0;
+            for (let k = loBin; k <= hiBin; k++) if (magnitudes[k] > bandPk) bandPk = magnitudes[k];
+            // Mute-fail (fretted notes only): did the open string ring instead?
+            let muteFail = false;
+            if (Number.isFinite(chartNote.f) && chartNote.f > 0) {
+                const openMidi = _ndMidiFromStringFret(chartNote.s, 0, currentArrangement, currentStringCount, tuningOffsets, capo);
+                const openHz = 440 * Math.pow(2, (openMidi - 69) / 12);
+                muteFail = _ndDetectMuteFail(magnitudes, binHz, expHz, openHz, bandPk);
+            }
+            // Presence: was the expected note actually there (player played it)?
+            const presenceComb = _ndHarmonicCombCount(magnitudes, binHz, expHz, bandPk);
+            return { stringEnergy, muteFail, presenceComb };
+        } catch (_) { return blank; }
+    }
+
+    // Was the player SILENT at a missed note's time (stopped / didn't play),
+    // vs the detector's low-string blind spot (string ringing, pitch unresolved)?
+    // Level samples are in visual time (songT = getTime + avOffset); the note's
+    // audio time maps to visual time + latencyOffset. true/false, or null if no
+    // level telemetry covers the window.
+    function _wasSilentAtNote(noteTime) {
+        return _ndIsSilentWindow(_ndLevelSamples, noteTime + latencyOffset, _ND_LEVEL_WIN_HALF, _ND_SILENCE_THRESHOLD);
+    }
+
     function makeMissJudgment(cn, noteTime, t, expectedMidi, extra = {}) {
         return _ndMakeJudgment({
             matched: false,
@@ -4987,6 +5106,13 @@ function createNoteDetector(options = {}) {
             tt:  Number.isFinite(judgment.totalStrings) ? judgment.totalStrings : undefined,
             sc:  Number.isFinite(judgment.score) ? +judgment.score.toFixed(3) : undefined,
             tf:  _diagTechFlags(nn),
+            // Conceded-miss attribution (coaching): mute-fail (open string rang
+            // instead of the fret), note-present + comb count (player played it,
+            // detector dropped it → tool miss vs flub), silent (stopped here).
+            mf:  judgment.muteFail ? true : undefined,
+            np:  judgment.notePresent ? true : undefined,
+            nc:  Number.isFinite(judgment.presenceComb) ? judgment.presenceComb : undefined,
+            sil: judgment.silent ? true : undefined,
         };
         if (_diagEvents.length < _DIAG_EVENT_CAP) {
             _diagEvents.push(eventObj);
@@ -5886,10 +6012,19 @@ function createNoteDetector(options = {}) {
                         : null,
                 });
                 _ndVerifyFailSnap.delete(key);
-                recordJudgment(
-                    key,
-                    makeMissJudgment(chartNote, noteTime, t, expectedMidi)
-                );
+                const missJudgment = makeMissJudgment(chartNote, noteTime, t, expectedMidi);
+                // ONE FFT of the note's rescue window feeds all three signals
+                // coaching reads on a miss: per-string energy (wrong-string /
+                // ambient), mute-fail (open string rang instead of the fret),
+                // and note-presence (player played it → detector blind-spot).
+                const an = _missAnalysisAtNote(chartNote, noteTime);
+                if (an.stringEnergy) missJudgment.stringEnergy = an.stringEnergy;
+                if (an.muteFail) missJudgment.muteFail = true;
+                if (an.presenceComb >= _ND_PRESENCE_MIN_COMB) missJudgment.notePresent = true;
+                if (an.presenceComb > 0) missJudgment.presenceComb = an.presenceComb;
+                // Player silent here (stopped / didn't play) vs blind-spot.
+                if (_wasSilentAtNote(noteTime) === true) missJudgment.silent = true;
+                recordJudgment(key, missJudgment);
                 }
             }
         };
