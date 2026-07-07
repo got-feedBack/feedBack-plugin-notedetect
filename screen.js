@@ -2760,6 +2760,14 @@ function createNoteDetector(options = {}) {
     // identity that matches the original .on registration.
     let drillOnLoopRestartFn = null;
     let drillOnSongChangedFn = null;
+    let drillOnLoopChangedFn = null;
+    // Safety-net poll pacing for hosts that don't emit
+    // playback:loop-set / playback:loop-cleared (older cores, or the
+    // manual A/B buttons before feedBack emitted loop-set for them).
+    // Event-driven sync is primary; updateHUD only falls back to a
+    // direct getLoop() read this often.
+    const DRILL_LOOP_POLL_MS = 1000;
+    let drillLoopPollLastMs = 0;
     // End-of-song summary subscription. Bound from enableImpl() so the
     // drill-mode listener count test (which calls _bindDrillEvents()
     // directly without going through enable) keeps seeing exactly the
@@ -11150,9 +11158,18 @@ function createNoteDetector(options = {}) {
     function updateHUD() {
         if (!enabled) return;
 
-        // Bridge slopsmith's loop state into our drill flag once per
-        // tick. Cheap (one getLoop read); avoids a separate poll.
-        _drillSyncFromLoopState();
+        // Bridge slopsmith's loop state into our drill flag. Loop
+        // changes normally arrive via the playback:loop-set /
+        // playback:loop-cleared events bound in _drillBindEvents; this
+        // is only the safety-net poll for hosts that don't emit them,
+        // throttled to ~1 Hz — getLoop() is a legacy bridge surface on
+        // newer hosts and every call is instrumented (bridge-hit event
+        // + diagnostics snapshot), so a 30 Hz poll is NOT cheap.
+        const nowMs = Date.now();
+        if (nowMs - drillLoopPollLastMs >= DRILL_LOOP_POLL_MS) {
+            drillLoopPollLastMs = nowMs;
+            _drillSyncFromLoopState();
+        }
         _drillRender();
 
         const total = hits + misses;
@@ -11783,21 +11800,32 @@ function createNoteDetector(options = {}) {
         // down what landed so a retry on the next call is clean.
         const onLoopRestart = _drillOnLoopRestart;
         const onSongChanged = _drillOnSongChanged;
+        // Loop set/clear notifications from the playback capability
+        // (feedBack emits these on window.feedBack as
+        // playback:loop-set / playback:loop-cleared). These make drill
+        // activation event-driven; the updateHUD getLoop() poll is
+        // only a throttled fallback for hosts without them.
+        const onLoopChanged = () => _drillSyncFromLoopState();
         try {
             window.slopsmith.on('loop:restart', onLoopRestart);
             window.slopsmith.on('song:loaded', onSongChanged);
             window.slopsmith.on('song:ended', onSongChanged);
+            window.slopsmith.on('playback:loop-set', onLoopChanged);
+            window.slopsmith.on('playback:loop-cleared', onLoopChanged);
         } catch (e) {
             // Partial registration — unwind so we don't leak handlers.
             if (typeof window.slopsmith.off === 'function') {
                 try { window.slopsmith.off('loop:restart', onLoopRestart); } catch (_) {}
                 try { window.slopsmith.off('song:loaded', onSongChanged); } catch (_) {}
                 try { window.slopsmith.off('song:ended', onSongChanged); } catch (_) {}
+                try { window.slopsmith.off('playback:loop-set', onLoopChanged); } catch (_) {}
+                try { window.slopsmith.off('playback:loop-cleared', onLoopChanged); } catch (_) {}
             }
             return;
         }
         drillOnLoopRestartFn = onLoopRestart;
         drillOnSongChangedFn = onSongChanged;
+        drillOnLoopChangedFn = onLoopChanged;
         drillSubscribed = true;
     }
 
@@ -12738,10 +12766,15 @@ function createNoteDetector(options = {}) {
                 try { window.slopsmith.off('song:loaded', drillOnSongChangedFn); } catch (e) {}
                 try { window.slopsmith.off('song:ended', drillOnSongChangedFn); } catch (e) {}
             }
+            if (drillOnLoopChangedFn) {
+                try { window.slopsmith.off('playback:loop-set', drillOnLoopChangedFn); } catch (e) {}
+                try { window.slopsmith.off('playback:loop-cleared', drillOnLoopChangedFn); } catch (e) {}
+            }
         }
         drillSubscribed = false;
         drillOnLoopRestartFn = null;
         drillOnSongChangedFn = null;
+        drillOnLoopChangedFn = null;
     }
 
     // End-of-song summary. Fire showSummary() when the audio reaches

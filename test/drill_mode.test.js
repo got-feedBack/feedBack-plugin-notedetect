@@ -283,3 +283,176 @@ test('mid-drill loop bounds change clears stale iteration history', () => {
     assert.equal(det.getDrillStats().active, true);
     det.destroy();
 });
+
+test('playback:loop-set / loop-cleared events drive drill sync without polling', () => {
+    const core = loadDetectionCore();
+    const det = core.createNoteDetector();
+    det._bindDrillEvents();
+    assert.equal(core.slopsmith._listenerCount('playback:loop-set'), 1);
+    assert.equal(core.slopsmith._listenerCount('playback:loop-cleared'), 1);
+
+    // Host arms a loop and emits the capability event — no explicit
+    // _drillSyncFromLoopState() call here. Judgments recorded right
+    // after must land in the drill counters, proving the event alone
+    // flipped drillEnabled (getDrillStats' inline sync happens too
+    // late to retroactively count them).
+    core.slopsmith._loop = { loopA: 10, loopB: 20 };
+    core.slopsmith._fire('playback:loop-set', { loop: { startTime: 10, endTime: 20 } });
+    for (let i = 0; i < 3; i++) det._recordJudgment(`e${i}`, judgment(true));
+    assert.equal(det.getDrillStats().current.hits, 3, 'event-armed drill must count judgments');
+
+    // Clearing via event deactivates.
+    core.slopsmith._loop = { loopA: null, loopB: null };
+    core.slopsmith._fire('playback:loop-cleared', {});
+    assert.equal(det.getDrillStats().active, false);
+
+    det.destroy();
+    assert.equal(core.slopsmith._listenerCount('playback:loop-set'), 0, 'destroy must unbind loop-set');
+    assert.equal(core.slopsmith._listenerCount('playback:loop-cleared'), 0, 'destroy must unbind loop-cleared');
+});
+
+test('_bindDrillEvents() binds playback:loop-set / playback:loop-cleared exactly once', () => {
+    const core = loadDetectionCore();
+    const det = core.createNoteDetector();
+    det._bindDrillEvents();
+    assert.equal(core.slopsmith._listenerCount('playback:loop-set'), 1);
+    assert.equal(core.slopsmith._listenerCount('playback:loop-cleared'), 1);
+    // Idempotent — calling again must NOT double-bind, same guarantee
+    // as the pre-existing loop:restart / song:loaded / song:ended trio.
+    det._bindDrillEvents();
+    assert.equal(core.slopsmith._listenerCount('playback:loop-set'), 1);
+    assert.equal(core.slopsmith._listenerCount('playback:loop-cleared'), 1);
+    det.destroy();
+});
+
+test('_unbindDrillEvents() hook removes playback:loop-set / loop-cleared without a full destroy', () => {
+    const core = loadDetectionCore();
+    const det = core.createNoteDetector();
+    det._bindDrillEvents();
+    assert.equal(core.slopsmith._listenerCount('playback:loop-set'), 1);
+    assert.equal(core.slopsmith._listenerCount('playback:loop-cleared'), 1);
+
+    det._unbindDrillEvents();
+    assert.equal(core.slopsmith._listenerCount('playback:loop-set'), 0);
+    assert.equal(core.slopsmith._listenerCount('playback:loop-cleared'), 0);
+    assert.equal(core.slopsmith._listenerCount('loop:restart'), 0);
+
+    // Idempotent — unbinding twice must not throw.
+    assert.doesNotThrow(() => det._unbindDrillEvents());
+
+    // The drillSubscribed gate must have been properly cleared so a
+    // fresh bind afterward re-registers cleanly (not stuck "already
+    // subscribed").
+    det._bindDrillEvents();
+    assert.equal(core.slopsmith._listenerCount('playback:loop-set'), 1);
+    assert.equal(core.slopsmith._listenerCount('playback:loop-cleared'), 1);
+    det.destroy();
+});
+
+test('playback:loop-set / loop-cleared handlers ignore the event payload and read live getLoop()', () => {
+    const core = loadDetectionCore();
+    const det = core.createNoteDetector();
+    det._bindDrillEvents();
+
+    // Detail claims a loop, but the bridge's actual state (_loop) still
+    // has no bounds — the handler must defer entirely to getLoop(),
+    // not the event payload, so drill must stay inactive.
+    core.slopsmith._loop = { loopA: null, loopB: null };
+    core.slopsmith._fire('playback:loop-set', { loop: { startTime: 100, endTime: 200 } });
+    assert.equal(det.getDrillStats().active, false, 'event detail must not drive activation, only getLoop()');
+
+    // Conversely, activation must fire off of getLoop() alone even when
+    // the event carries no usable detail at all.
+    core.slopsmith._loop = { loopA: 1, loopB: 2 };
+    core.slopsmith._fire('playback:loop-set', undefined);
+    assert.equal(det.getDrillStats().active, true, 'activation must come from getLoop(), independent of detail shape');
+
+    det.destroy();
+});
+
+test('repeated playback:loop-set events with unchanged bounds do not reset the active iteration', () => {
+    const core = loadDetectionCore();
+    const det = core.createNoteDetector();
+    det._bindDrillEvents();
+
+    core.slopsmith._loop = { loopA: 10, loopB: 20 };
+    core.slopsmith._fire('playback:loop-set', { loop: { startTime: 10, endTime: 20 } });
+    for (let i = 0; i < 4; i++) det._recordJudgment(`a${i}`, judgment(true));
+
+    // Host re-emits loop-set for the SAME bounds (e.g. re-arming the
+    // identical A/B via the manual buttons after the event was already
+    // wired) — must not wipe the in-flight iteration's live counters.
+    core.slopsmith._fire('playback:loop-set', { loop: { startTime: 10, endTime: 20 } });
+    assert.equal(det.getDrillStats().current.hits, 4, 'unchanged-bounds re-fire must not reset live counters');
+
+    det.destroy();
+});
+
+test('playback:loop-cleared fired with no prior active loop is a safe no-op', () => {
+    const core = loadDetectionCore();
+    const det = core.createNoteDetector();
+    det._bindDrillEvents();
+
+    // No loop was ever armed (getLoop() still {null,null}); a stray
+    // loop-cleared must not throw or flip drill state.
+    assert.doesNotThrow(() => {
+        core.slopsmith._fire('playback:loop-cleared', {});
+    });
+    assert.equal(det.getDrillStats().active, false);
+    assert.equal(det.getDrillStats().iterations.length, 0);
+    det.destroy();
+});
+
+test('_bindDrillEvents() partial-registration failure rolls back all listeners including loop-set/loop-cleared', () => {
+    const core = loadDetectionCore();
+    const det = core.createNoteDetector();
+
+    // Simulate a host whose `.on` throws partway through registration —
+    // let the first three (loop:restart, song:loaded, song:ended) land,
+    // then blow up on the fourth (playback:loop-set).
+    let callCount = 0;
+    const realOn = core.slopsmith.on;
+    core.slopsmith.on = (event, fn) => {
+        callCount++;
+        if (callCount === 4) throw new Error('boom');
+        realOn(event, fn);
+    };
+
+    det._bindDrillEvents();
+
+    // Rollback must unwind everything that landed before the throw, and
+    // leave the two new events unregistered too.
+    assert.equal(core.slopsmith._listenerCount('loop:restart'), 0, 'rollback must unbind loop:restart');
+    assert.equal(core.slopsmith._listenerCount('song:loaded'), 0, 'rollback must unbind song:loaded');
+    assert.equal(core.slopsmith._listenerCount('song:ended'), 0, 'rollback must unbind song:ended');
+    assert.equal(core.slopsmith._listenerCount('playback:loop-set'), 0);
+    assert.equal(core.slopsmith._listenerCount('playback:loop-cleared'), 0);
+
+    // Restore the real `.on` and confirm the gate wasn't left stuck —
+    // a subsequent bind attempt must succeed cleanly.
+    core.slopsmith.on = realOn;
+    det._bindDrillEvents();
+    assert.equal(core.slopsmith._listenerCount('playback:loop-set'), 1);
+    assert.equal(core.slopsmith._listenerCount('playback:loop-cleared'), 1);
+    det.destroy();
+});
+
+test('destroy() makes playback:loop-set / loop-cleared events no-ops', () => {
+    const core = loadDetectionCore();
+    const det = core.createNoteDetector();
+    det._bindDrillEvents();
+    core.slopsmith._loop = { loopA: 10, loopB: 20 };
+    core.slopsmith._fire('playback:loop-set', {});
+    assert.equal(det.getDrillStats().active, true);
+
+    det.destroy();
+
+    // Firing after destroy must not throw and must not resurrect drill
+    // state on an already-destroyed instance.
+    assert.doesNotThrow(() => {
+        core.slopsmith._fire('playback:loop-set', {});
+        core.slopsmith._fire('playback:loop-cleared', {});
+    });
+    assert.equal(core.slopsmith._listenerCount('playback:loop-set'), 0);
+    assert.equal(core.slopsmith._listenerCount('playback:loop-cleared'), 0);
+});
