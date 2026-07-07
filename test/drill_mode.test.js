@@ -283,3 +283,30 @@ test('mid-drill loop bounds change clears stale iteration history', () => {
     assert.equal(det.getDrillStats().active, true);
     det.destroy();
 });
+
+test('playback:loop-set / loop-cleared events drive drill sync without polling', () => {
+    const core = loadDetectionCore();
+    const det = core.createNoteDetector();
+    det._bindDrillEvents();
+    assert.equal(core.slopsmith._listenerCount('playback:loop-set'), 1);
+    assert.equal(core.slopsmith._listenerCount('playback:loop-cleared'), 1);
+
+    // Host arms a loop and emits the capability event — no explicit
+    // _drillSyncFromLoopState() call here. Judgments recorded right
+    // after must land in the drill counters, proving the event alone
+    // flipped drillEnabled (getDrillStats' inline sync happens too
+    // late to retroactively count them).
+    core.slopsmith._loop = { loopA: 10, loopB: 20 };
+    core.slopsmith._fire('playback:loop-set', { loop: { startTime: 10, endTime: 20 } });
+    for (let i = 0; i < 3; i++) det._recordJudgment(`e${i}`, judgment(true));
+    assert.equal(det.getDrillStats().current.hits, 3, 'event-armed drill must count judgments');
+
+    // Clearing via event deactivates.
+    core.slopsmith._loop = { loopA: null, loopB: null };
+    core.slopsmith._fire('playback:loop-cleared', {});
+    assert.equal(det.getDrillStats().active, false);
+
+    det.destroy();
+    assert.equal(core.slopsmith._listenerCount('playback:loop-set'), 0, 'destroy must unbind loop-set');
+    assert.equal(core.slopsmith._listenerCount('playback:loop-cleared'), 0, 'destroy must unbind loop-cleared');
+});
