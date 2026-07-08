@@ -1817,6 +1817,18 @@ function _ndDrillRampDecision(score, goal, rung, ladderLength, topClears = 0, re
     return { action: 'advance', nextRung: rung + 1 };
 }
 
+// Score one drill pass: fraction of the CHARTED notes in the judge window the
+// player actually hit. Denominator is what the chart asks for, NOT just the
+// notes the detector heard — otherwise a pass where you played little or
+// nothing collapses to 0/0 and reads as "no attempt" (or a couple of stray
+// hits read as 100%), which let an untouched loop climb the ladder. Returns
+// null when nothing is charted (chart still loading / rest-only window) so the
+// caller skips without scoring. Pure → node-testable.
+function _ndDrillPassScore(hits, charted) {
+    if (!Number.isFinite(charted) || charted <= 0) return null;
+    return Math.max(0, Number(hits) || 0) / charted;
+}
+
 // Auto-drill trigger. While learning a song there's no usable per-note feedback
 // mid-play, and waiting for the post-play summary costs a whole run — so instead
 // jump straight into a drill loop the moment the player fluffs a RUN of notes.
@@ -12053,6 +12065,10 @@ function createNoteDetector(options = {}) {
         drillConductorLabel = label || `${judgeStart.toFixed(1)}–${judgeEnd.toFixed(1)}s`;
         drillConductorRange = { loopStart, loopEnd, judgeStart, judgeEnd };
         drillConductorExpandsLeft = expandContext ? Math.max(0, maxExpansions) : 0;
+        // Wipe any judgments already sitting in this window from the initial
+        // playthrough — otherwise the first wrap re-scores those stale hits and
+        // the loop "graduates" without the player touching it.
+        _drillClearWindow(judgeStart, judgeEnd);
         _ndDrillLastChartT = 0;          // reset wrap detector for this drill
         _ndDrillLastScoredPerf = 0;
         // Window-level flag the host's loop-wrap handler reads to skip its
@@ -12254,7 +12270,42 @@ function createNoteDetector(options = {}) {
         } catch (e) { console.warn('[note_detect] drill expand setLoop threw:', e); }
         _drillInitBeats();
         _drillConductorUpdateHud({ expanded: true });
+        _drillClearWindow(judgeStart, newEnd);
         return true;
+    }
+
+    // How many CHART notes (singles + chords) fall in [a, b] — the true
+    // denominator for a drill pass. Same source startDrill uses for the runway.
+    function _drillChartedCount(a, b) {
+        const _hw = resolveHw();
+        if (!_hw) return 0;
+        const inWin = (item) => {
+            const t = Number.isFinite(item && item.t) ? item.t
+                : (item && Number.isFinite(item.time) ? item.time : null);
+            return t != null && t >= a && t <= b;
+        };
+        let n = 0;
+        const notes = (_hw.getNotes && _hw.getNotes()) || [];
+        for (const x of notes) if (inWin(x)) n++;
+        const chords = (_hw.getChords && _hw.getChords()) || [];
+        for (const x of chords) if (inWin(x)) n++;
+        return n;
+    }
+
+    // Drop every judgment whose chart time falls in [a, b] so a drill iteration
+    // scores only what the player does THIS pass. Called at drill start and
+    // after scoring each wrap — the conductor can't rely on the browser-only
+    // reopen-on-seek (skipped on the engine-verifier path), which is what let
+    // stale first-play hits keep re-scoring and "graduate" an untouched loop.
+    function _drillClearWindow(a, b) {
+        for (const [key, v] of noteResults) {
+            const t = Number.isFinite(v && v.noteTime) ? v.noteTime
+                : parseFloat(String(key).split('_')[0]);
+            if (Number.isFinite(t) && t >= a && t <= b) {
+                noteResults.delete(key);
+                _susActiveUntil.delete(key);
+            }
+        }
     }
 
     function _drillConductorOnWrap() {
@@ -12266,26 +12317,29 @@ function createNoteDetector(options = {}) {
         const { judgeStart, judgeEnd } = drillConductorRange;
         const arr = [];
         for (const v of noteResults.values()) arr.push(v);
-        let hits = 0, total = 0;
+        // Denominator = the notes the CHART asks for in the judge window, NOT
+        // just the ones the detector happened to hear. Grading against "heard"
+        // notes let a pass where you played little or nothing collapse to 0/0
+        // (skipped, so it never failed) or read a couple of stray hits as 100%
+        // — so an empty loop climbed the ladder and "graduated". Grade against
+        // the chart: no play, no pass. (Pairs with the bass miss-rescue, which
+        // pulls most low notes out of the blind spot so they're hittable.)
+        const charted = _drillChartedCount(judgeStart, judgeEnd);
+        let hits = 0;
         for (const j of arr) {
             const t = Number.isFinite(j && j.noteTime) ? j.noteTime : null;
             if (t == null || t < judgeStart || t > judgeEnd) continue;
-            if (j.hit) { hits++; total++; continue; }
-            // Count a miss against the player ONLY if the detector actually
-            // heard the note (late/early/sharp/flat). A no_detection on bass is
-            // the detector's low-string blind spot, not a flub — counting it
-            // would make a loop containing an unhearable note (e.g. low-E
-            // fret 7/8) IMPOSSIBLE to pass, so the auto-slowdown would crawl
-            // toward zero forever. Score only on notes the detector can verify.
-            const heard = j.timingState != null || j.pitchState != null || j.detectedMidi != null;
-            if (heard) total++;
+            if (j.hit) hits++;
         }
-        // No verifiable notes this pass (nothing crossed yet, or the whole
-        // window is in the detector's blind spot) — not a real attempt. Skip:
-        // no score, so no spurious slowdown.
-        if (total === 0) return;
-        const score = hits / total;
+        // Nothing charted here yet (chart still loading, or a rest-only window)
+        // — not a real attempt, so no score and no window clear.
+        const score = _ndDrillPassScore(hits, charted);
+        if (score == null) return;
         if (score > drillConductorBest) drillConductorBest = score;
+        // Clear this pass's judgments so the NEXT iteration scores only what the
+        // player does next time. `arr` above is a snapshot, so the per-note miss
+        // summary below still works. See _drillClearWindow.
+        _drillClearWindow(judgeStart, judgeEnd);
 
         const decision = _ndDrillRampDecision(
             score, drillConductorGoal, drillConductorRung, drillConductorLadder.length,

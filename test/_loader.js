@@ -312,8 +312,9 @@ function loadDetectionCore({ sandboxBeforeRun } = {}) {
         multiplierForStreak: sandbox._ndMultiplierForStreak,
         isStreakMilestone: sandbox._ndIsStreakMilestone,
         gradeFor: sandbox._ndGradeFor,
-        // Drill conductor pure decision fn (ported from slopsmith 1.39.1).
+        // Drill conductor pure decision fns (ported from slopsmith 1.39.1).
         drillRampDecision: sandbox._ndDrillRampDecision,
+        drillPassScore: sandbox._ndDrillPassScore,
         // Auto-drill (contiguous-miss trigger) pure fns.
         autoDrillShouldTrigger: sandbox._ndAutoDrillShouldTrigger,
         autoDrillRange: sandbox._ndAutoDrillRange,
