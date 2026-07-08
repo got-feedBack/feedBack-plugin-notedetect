@@ -2468,6 +2468,7 @@ function createNoteDetector(options = {}) {
     let _lastInputRecover = 0;        // throttle re-acquire so a glitch storm can't thrash
     let scoringWatchdog = null;       // persistent setInterval handle (cleared in destroy)
     let _healthTrack = null;          // the live input MediaStreamTrack (for dropout telemetry)
+    let _healthHandlers = null;       // { track, ended, mute, unmute } — stored so we can detach before rebinding
 
     // Calibration Wizard v2 — system setup only (safe settings; no scoring thresholds)
     let _calWizardEl = null;
@@ -4007,10 +4008,28 @@ function createNoteDetector(options = {}) {
     // input lost + surface it (not left guessing why nothing scored) and, after
     // a short grace for the device to self-heal, re-acquire ONCE — throttled so
     // a flapping device can't thrash getUserMedia. `unmute` clears it.
+    // Detach the ended/mute/unmute listeners bound by a previous
+    // _bindStreamHealth. On the shared externalStream path the same track
+    // survives restart cycles, so without this each startAudio() would stack
+    // another set of closures on it and fire markLost() N times per drop.
+    function _unbindStreamHealth() {
+        if (!_healthHandlers) return;
+        const { track, ended, mute, unmute } = _healthHandlers;
+        try {
+            track.removeEventListener('ended', ended);
+            track.removeEventListener('mute', mute);
+            track.removeEventListener('unmute', unmute);
+        } catch (_) { /* track event API unavailable */ }
+        _healthHandlers = null;
+    }
+
     function _bindStreamHealth(s) {
         if (!s || typeof s.getAudioTracks !== 'function') return;
         const track = s.getAudioTracks()[0];
         if (!track) return;
+        // Drop any prior binding first so restart cycles don't accumulate
+        // duplicate listeners on a reused track.
+        _unbindStreamHealth();
         _healthTrack = track;   // captured for the dropout-telemetry record
         const markLost = (why) => {
             if (_inputLost || !enabled) return;
@@ -4026,14 +4045,18 @@ function createNoteDetector(options = {}) {
                 try { restartAudio(); } catch (_) {}
             }, 1500);
         };
+        const onEnded = () => markLost('ended');
+        const onMute = () => markLost('muted');
+        const onUnmute = () => {
+            if (!_inputLost) return;
+            _inputLost = false;
+            try { updateButton(); } catch (_) {}
+        };
         try {
-            track.addEventListener('ended', () => markLost('ended'));
-            track.addEventListener('mute', () => markLost('muted'));
-            track.addEventListener('unmute', () => {
-                if (!_inputLost) return;
-                _inputLost = false;
-                try { updateButton(); } catch (_) {}
-            });
+            track.addEventListener('ended', onEnded);
+            track.addEventListener('mute', onMute);
+            track.addEventListener('unmute', onUnmute);
+            _healthHandlers = { track, ended: onEnded, mute: onMute, unmute: onUnmute };
         } catch (_) { /* track event API unavailable */ }
     }
 
@@ -4053,6 +4076,13 @@ function createNoteDetector(options = {}) {
 
     function _scoringWatchdogTick() {
         const now = (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0;
+        // In split mode the default singleton is suppressed — a panel owns
+        // capture. Without this guard the watchdog would call enable() on the
+        // suppressed default and bring the main HUD/mic back on top of P1.
+        // Mirrors the check in _reArmOnSongLoaded() and construct-time auto-enable.
+        if (typeof window !== 'undefined' && window.__ndSuppressDefault) {
+            _wdPlayStartT = 0; _clearScoringStall(); return;
+        }
         const playing = !!(window.slopsmith && window.slopsmith.isPlaying);
         // Only meaningful while playing AND the user wants detection on.
         if (!playing || !detectPreference) { _wdPlayStartT = 0; _clearScoringStall(); return; }
@@ -4162,6 +4192,7 @@ function createNoteDetector(options = {}) {
         // here, so the predicate could otherwise miscompute a stale arm.
         _ndSyncMlGate(_ndGateToken, false, _ndBridgeAudio());
         _inputLost = false;
+        _unbindStreamHealth();
         _healthTrack = null;
         stopLevelMeter();
         stopBridgeLevelMeter();
