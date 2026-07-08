@@ -11859,6 +11859,13 @@ function createNoteDetector(options = {}) {
         _chordLastResult.clear();
         _rescueBuf = new Float32Array(0);
         _rescueBufEndT = 0;
+        // Zero the rescue counters too — the diagnostic summary reports them
+        // alongside per-song hits/misses, so leaving them would leak
+        // session-cumulative rescue counts into each song's report.
+        _rescueCalls = 0;
+        _rescueWindows = 0;
+        _rescueHits = 0;
+        _rescueSkippedSilent = 0;
         _ndVerifierRejects.length = 0;
         _ndRejectDedup.clear();
         _ndVerifyFailSnap.clear();
