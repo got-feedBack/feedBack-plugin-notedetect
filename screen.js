@@ -12325,10 +12325,25 @@ function createNoteDetector(options = {}) {
         // the chart: no play, no pass. (Pairs with the bass miss-rescue, which
         // pulls most low notes out of the blind spot so they're hittable.)
         const charted = _drillChartedCount(judgeStart, judgeEnd);
+        // Count hits at the SAME granularity as the denominator: each note and
+        // each chord is worth 1. For a chord, noteResults holds BOTH the
+        // chord-level verdict (key `<t>_chord`, chord:true) AND one entry per
+        // constituent string (no chord flag, same noteTime) — so iterating every
+        // value would credit a hit chord as 1 verdict + N strings while
+        // _drillChartedCount counts the chord once, inflating the score past
+        // 100%. Count the verdict, skip the per-string members (non-`_chord`
+        // entries sharing a chord's time). `arr` above stays intact for the miss
+        // summary, which wants the per-string detail.
+        const chordTimeKeys = new Set();
+        for (const key of noteResults.keys()) {
+            const s = String(key);
+            if (s.endsWith('_chord')) chordTimeKeys.add(s.slice(0, -6));
+        }
         let hits = 0;
-        for (const j of arr) {
+        for (const [key, j] of noteResults) {
             const t = Number.isFinite(j && j.noteTime) ? j.noteTime : null;
             if (t == null || t < judgeStart || t > judgeEnd) continue;
+            if (!String(key).endsWith('_chord') && chordTimeKeys.has(t.toFixed(3))) continue;
             if (j.hit) hits++;
         }
         // Nothing charted here yet (chart still loading, or a rest-only window)
@@ -12588,7 +12603,11 @@ function createNoteDetector(options = {}) {
         } else {
             banner = `<div class="text-gray-300 text-sm">Play the loop — hit <span class="font-bold">${goalPct}%</span> clean to speed up.</div>`;
         }
-        const sub = `<div class="text-gray-500 text-[11px] mt-0.5">🎯 ${speedPct}% speed${atTop ? ' (full)' : ''} · best ${bestPct}%${drillConductorFocus ? ' · ' + drillConductorFocus : (drillConductorLabel ? ' · ' + drillConductorLabel : '')}</div>`;
+        // drillConductorFocus / drillConductorLabel can come from the public
+        // startDrill(start, end, { label, focus }) opts, so escape them before
+        // interpolating into this innerHTML sink (consistent with the summary
+        // card's handling of user-facing strings).
+        const sub = `<div class="text-gray-500 text-[11px] mt-0.5">🎯 ${speedPct}% speed${atTop ? ' (full)' : ''} · best ${bestPct}%${drillConductorFocus ? ' · ' + _ndEscapeHtml(drillConductorFocus) : (drillConductorLabel ? ' · ' + _ndEscapeHtml(drillConductorLabel) : '')}</div>`;
         // Per-note "what you missed + how" for the pass just finished.
         const howColor = { missed: 'text-red-300', late: 'text-amber-300', early: 'text-amber-300', sharp: 'text-purple-300', flat: 'text-purple-300', wrong: 'text-red-300' };
         let missList = '';
