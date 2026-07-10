@@ -2128,6 +2128,17 @@ function _ndEncodeWavPcm16(chunks, sampleRate) {
     return buf;
 }
 
+// Pure health predicate for the scoring watchdog. Extracted so the
+// enabled/bridge/external/mic-callback decision is unit-testable without the
+// DOM + play-timing the full tick needs. Healthy when detection is on AND one
+// of the scoring inputs is live: the desktop bridge, an external MIDI provider
+// (keys/piano — opens no audio graph, so cbFresh is permanently false there and
+// _extActive must count as healthy or the watchdog spuriously banners + reopens
+// the mic against MIDI scoring), or a fresh mic callback.
+function _ndScoringHealthy(enabled, usingBridge, extActive, cbFresh) {
+    return !!(enabled && (usingBridge || extActive || cbFresh));
+}
+
 function createNoteDetector(options = {}) {
     const opts = options || {};
     // Highway is resolved lazily. A caller can pass `highway` in
@@ -4093,7 +4104,13 @@ function createNoteDetector(options = {}) {
         // bridge path doesn't use onaudioprocess, so treat enabled-on-bridge as
         // healthy — its own input handling owns that case.
         const cbFresh = (now - _lastAudioCbT) < 1800;
-        if (enabled && (usingDesktopBridge || cbFresh)) { _clearScoringStall(); return; }
+        if (_ndScoringHealthy(enabled, usingDesktopBridge, _extActive, cbFresh)) { _clearScoringStall(); return; }
+        // Keys/piano arrangements are scored by an external MIDI provider, never
+        // the mic. A keys song idle-waiting for its provider to bind is legitimately
+        // enabled=false (enableImpl bails without opening the mic) — not a dropped
+        // input. The _extWatchOpen watcher owns (re)binding, so never banner or
+        // re-open the mic here regardless of enabled/_extActive state.
+        if (_ndIsExternalScoredArrangement()) { _clearScoringStall(); return; }
         // Wants detection, song playing, but not scoring. Surface loudly NOW
         // (seconds in, not at song end) and auto-recover the right way:
         // re-enable if Detect fell off, or re-acquire the input if it's
