@@ -318,6 +318,22 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // hand-maintained constant the diagnostic path keys off of.
 const _ND_VERSION = '1.28.0';
 
+// Bleed-rescue tuning for the low-bass blind spot. A bass DI's fundamental is
+// weaker than its 2nd harmonic and an open string / neighbour often rings the
+// loudest bin in the band, so a present low note fails the single-peak pitch
+// check. When that happens we confirm the EXPECTED note directly by its
+// harmonic comb. Ported from slopsmith note_detect 1.39.1 (primitive recall
+// 59%→72% on a clean bass take); see _ndHarmonicCombCount / tools/probe-bleed.js.
+const _ND_HARMONIC_FALLBACK_MAX_HZ = 140;   // ~C#3; covers the whole 4-string bass blind spot
+const _ND_HARMONIC_FALLBACK_RATIOS = [1, 2, 3, 4, 5];
+const _ND_HARMONIC_FALLBACK_HALF_CENTS = 80; // ±half-window around each harmonic (≈1.5 coarse low bins)
+const _ND_HARMONIC_FALLBACK_PEAK_FRAC = 0.40; // each counted harmonic ≥ this fraction of the band peak
+const _ND_HARMONIC_FALLBACK_MIN_HARMONICS = 3; // need this many coherent harmonics to accept
+// Post-miss PRESENCE check (coaching fault attribution, not hit/miss): how many
+// coherent harmonics of the expected note must appear for us to say the player
+// DID play it (so the miss is a detector blind-spot, not a no-play).
+const _ND_PRESENCE_MIN_COMB = 2;
+
 // Audio processing constants
 const _ND_MIN_YIN_SAMPLES = 4096;  // enough for low E at 48kHz (need tau=585, halfLen=2048)
 // ScriptProcessor buffer size. The YIN analysis buffer is a separate
@@ -1869,7 +1885,100 @@ function _ndConstraintCheckString(
     const centsError = _ndFoldOctaveCents(rawCentsError);
     const centsDiff = Math.abs(centsError);
 
-    return { hit: centsDiff <= pitchCheckCents, bandEnergy, centsDiff, centsError };
+    let hit = centsDiff <= pitchCheckCents;
+    // Bleed rescue for the low blind spot: the single-peak read above grabbed
+    // the loudest bin in the whole band, which on bass is often an open string
+    // or neighbour ringing under the fretted note — so a present low note gets
+    // rejected. When the cents check fails AND the expected fundamental is low,
+    // fall back to confirming the EXPECTED note's harmonic comb directly. Purely
+    // additive (it can only turn a miss into a hit, never the reverse) and gated
+    // on a low expectedHz, so this fallback never fires for guitar. NB the
+    // branch's rescue + miss-attribution are all bass-gated, but the per-frame
+    // level/diagnostic recording it feeds (processFrame level history,
+    // _wasSilentAtNote, _ndStrikeLevelContext) is a deliberate cross-arrangement
+    // change that DOES run on browser guitar — it is diagnostics-only and never
+    // affects guitar hit/miss/score. See _ND_HARMONIC_FALLBACK_*.
+    if (!hit && expectedHz <= _ND_HARMONIC_FALLBACK_MAX_HZ
+        && _ndHarmonicCoherenceLow(magnitudes, binHz, expectedHz, peakVal)) {
+        hit = true;
+    }
+    return { hit, bandEnergy, centsDiff, centsError };
+}
+
+// Count how many of the expected note's harmonics (k·f0 for the configured
+// ratios) appear as a genuine LOCAL-MAXIMUM spectral peak whose magnitude is at
+// least _ND_HARMONIC_FALLBACK_PEAK_FRAC of the band's peak, within
+// ±_ND_HARMONIC_FALLBACK_HALF_CENTS of the ideal harmonic frequency; accept the
+// note when at least _ND_HARMONIC_FALLBACK_MIN_HARMONICS line up. Keying on the
+// upper harmonics (well-resolved at higher Hz) and requiring ratio-locked
+// peaks is what separates a genuinely-ringing low note from open-string bleed
+// or a coincidental neighbour — see the note on _ND_HARMONIC_FALLBACK_MAX_HZ.
+function _ndHarmonicCoherenceLow(magnitudes, binHz, expectedHz, bandPeakMag) {
+    return _ndHarmonicCombCount(magnitudes, binHz, expectedHz, bandPeakMag) >= _ND_HARMONIC_FALLBACK_MIN_HARMONICS;
+}
+
+// How many of `expectedHz`'s harmonics (ratios 1..5) appear as a genuine
+// local-maximum peak ≥ _ND_HARMONIC_FALLBACK_PEAK_FRAC of bandPeakMag, within
+// ±_ND_HARMONIC_FALLBACK_HALF_CENTS of the ideal harmonic frequency.
+function _ndHarmonicCombCount(magnitudes, binHz, expectedHz, bandPeakMag) {
+    if (!(bandPeakMag > 0) || !(expectedHz > 0) || !(binHz > 0)) return 0;
+    const widen = Math.pow(2, _ND_HARMONIC_FALLBACK_HALF_CENTS / 1200);
+    const floor = _ND_HARMONIC_FALLBACK_PEAK_FRAC * bandPeakMag;
+    const nBins = magnitudes.length;
+    let coherent = 0;
+    for (const k of _ND_HARMONIC_FALLBACK_RATIOS) {
+        const f = expectedHz * k;
+        const lo = Math.max(1, Math.floor((f / widen) / binHz));
+        const hi = Math.min(nBins - 2, Math.ceil((f * widen) / binHz));
+        let bestBin = -1;
+        let bestVal = -Infinity;
+        for (let b = lo; b <= hi; b++) {
+            if (magnitudes[b] > bestVal) { bestVal = magnitudes[b]; bestBin = b; }
+        }
+        if (bestBin < 0 || bestVal < floor) continue;
+        // Require a true local maximum — a bleed/neighbour harmonic leaking into
+        // the window is a shoulder, not a peak.
+        if (magnitudes[bestBin] >= magnitudes[bestBin - 1] && magnitudes[bestBin] >= magnitudes[bestBin + 1]) {
+            coherent++;
+        }
+    }
+    return coherent;
+}
+
+// Mute-fail check for a conceded miss: did the OPEN string ring in place of the
+// charted FRETTED note? (You fingered the wrong fret or failed to fret/mute, so
+// the open string sounded instead.) A genuinely valid reason to miss — distinct
+// from "played nothing" (no comb anywhere) and "detector dropped a note you
+// played" (the fretted comb IS present). Returns true only for a fretted note
+// whose open-string comb is clearly present AND stronger than the fretted comb.
+function _ndDetectMuteFail(magnitudes, binHz, expectedHz, openHz, bandPeakMag) {
+    if (!(openHz > 0) || !(expectedHz > 0)) return false;
+    // Open note and fretted note must be meaningfully different pitches.
+    if (Math.abs(1200 * Math.log2(expectedHz / openHz)) < 120) return false;
+    const openComb = _ndHarmonicCombCount(magnitudes, binHz, openHz, bandPeakMag);
+    if (openComb < _ND_HARMONIC_FALLBACK_MIN_HARMONICS) return false;
+    const frettedComb = _ndHarmonicCombCount(magnitudes, binHz, expectedHz, bandPeakMag);
+    return openComb > frettedComb;
+}
+
+// Was the input SILENT across a ±halfWin window around centerT (visual/song
+// time)? Peak level below `threshold` = silence (player stopped / didn't play),
+// vs the low-string blind spot (string ringing, pitch unresolved). Returns
+// true/false, or null when there's no level telemetry in the window.
+function _ndIsSilentWindow(samples, centerT, halfWin, threshold) {
+    if (!Array.isArray(samples) || samples.length === 0) return null;
+    let peak = 0;
+    let inWindow = 0;
+    for (let i = samples.length - 1; i >= 0; i--) {
+        const s = samples[i];
+        if (!s) continue;
+        if (s.songT > centerT + halfWin) continue;
+        if (s.songT < centerT - halfWin) break;
+        inWindow++;
+        if (s.level > peak) peak = s.level;
+    }
+    if (inWindow === 0) return null;
+    return peak < threshold;
 }
 
 // Score a chord by checking each of its constituent notes against their
@@ -2931,6 +3040,30 @@ function createNoteDetector(options = {}) {
     // stale per-chord result from one take can't leak into a later one.
     const _chordLastResult = new Map();
     let lastChordTime = -Infinity;
+
+    // Bass miss rescue: a bass DI's fundamental is weak and the live 4096-pt
+    // detection window can't resolve a 55 Hz note, so correctly-played low
+    // notes retire as misses. Instead we buffer recent raw audio and, when a
+    // bass single note is about to retire, re-check its pitch on a long window
+    // CENTERED on its expected time (the chart tells us where it should be) with
+    // the harmonic-comb rescue in _ndConstraintCheckString. Ported from
+    // slopsmith note_detect 1.39.1. Bass-only; cleared on resetScoring.
+    const _RESCUE_BUF_MAX = 32768;   // ~680 ms @ 48 kHz — covers retire lag + half-window
+    const _RESCUE_WIN = 16384;       // ~340 ms — resolves a 55 Hz fundamental
+    let _rescueBuf = new Float32Array(0);
+    let _rescueBufEndT = 0;          // hw time (s) of the newest sample in _rescueBuf
+    let _rescueCalls = 0, _rescueWindows = 0, _rescueHits = 0, _rescueSkippedSilent = 0;
+    // Per-tick rescue-FFT budget. One conceded bass miss can fire up to ~5
+    // rescue windows (_tryBassRescue) + 1 attribution FFT (_missAnalysisAtNote),
+    // all 16384-pt. Normal play concedes ~1 miss/tick — well under this. But
+    // after a backward seek / lag spike / drill-loop wrap a whole batch of misses
+    // retires on a single checkMisses tick; unbounded that is hundreds of ms of
+    // synchronous FFT and dropped frames. Cap the windows spent per tick (≈4
+    // misses' worth); once spent, the remaining conceded bass misses this tick
+    // retire as PLAIN misses (no rescue, no attribution). Rescue is purely
+    // additive — it only upgrades a miss to a hit — so one landing a frame late,
+    // or not at all under a storm, is invisible to scoring.
+    const _RESCUE_WINDOWS_PER_TICK = 24;
 
     // Tuning — per-instance so panels can be on different songs.
     // tuningOffsets is resized to match the actual string count on enable();
@@ -4609,6 +4742,40 @@ function createNoteDetector(options = {}) {
 
     // ── Frame processing ──────────────────────────────────────────────
     async function processFrame(buffer) {
+        // Append to the rolling raw-audio buffer for the bass miss rescue
+        // (checkMisses). Bass only — guitar's higher fundamentals resolve in
+        // the short window, so it doesn't need (or pay for) this.
+        if (currentArrangement === 'bass' && buffer && buffer.length) {
+            const keep = Math.min(_RESCUE_BUF_MAX, _rescueBuf.length + buffer.length);
+            const nb = new Float32Array(keep);
+            const fromBuf = Math.min(buffer.length, keep);
+            nb.set(buffer.subarray(buffer.length - fromBuf), keep - fromBuf);
+            const remain = keep - fromBuf;
+            if (remain > 0) nb.set(_rescueBuf.subarray(_rescueBuf.length - remain), 0);
+            _rescueBuf = nb;
+            if (hw && hw.getTime) _rescueBufEndT = hw.getTime();
+        }
+        // Record the per-frame input level into the level-history time series so
+        // the silence gate ("was the player silent here") works on the BROWSER
+        // path too (it was desktop-only — fed from the engine's level callback).
+        // Without this, a stretch where the player stopped playing is
+        // indistinguishable from a low-bass detection gap downstream. Same rms*5
+        // scaling + 0.02 threshold the desktop path uses; skip on the bridge
+        // path (its level callback already records). Pruning / backward-jump
+        // reset mirror the desktop block.
+        if (!usingDesktopBridge && buffer && buffer.length && hw && typeof hw.getTime === 'function') {
+            let sum = 0;
+            for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i];
+            const lvl = Math.min(1, Math.max(0, Math.sqrt(sum / buffer.length) * 5));
+            const avO = (hw.getAvOffset ? hw.getAvOffset() / 1000 : 0);
+            const songT = hw.getTime() + avO;
+            const last = _ndLevelSamples.length ? _ndLevelSamples[_ndLevelSamples.length - 1].songT : -Infinity;
+            if (songT < last - 0.05) _ndLevelSamples.length = 0;   // seek / drill-wrap → reset
+            _ndLevelSamples.push({ songT, level: lvl });
+            const cutoff = songT - _ND_LEVEL_HISTORY_S;
+            while (_ndLevelSamples.length > 0 && _ndLevelSamples[0].songT < cutoff) _ndLevelSamples.shift();
+            while (_ndLevelSamples.length > 240) _ndLevelSamples.shift();
+        }
         let result;
         let detectorUsed;
         // Capture the session generation at frame start. disable()
@@ -5005,6 +5172,120 @@ function createNoteDetector(options = {}) {
         });
     }
 
+    // Bass long-window rescue: a bass single note about to retire as a miss is
+    // re-checked on a 16384-pt window CENTERED on its expected chart time, which
+    // resolves the low fundamental the live 4096-pt frame can't. Scans
+    // center-outward ±160 ms (the live audio path drifts vs the chart stamp) and
+    // only accepts the EXPECTED pitch, so it never admits a wrong note. Returns
+    // a matched judgment on rescue, else null. Bass-only. See _RESCUE_WIN.
+    function _tryBassRescue(cn, noteTime, expectedMidi) {
+        if (currentArrangement !== 'bass' || _rescueBuf.length < _RESCUE_WIN) return null;
+        const sr = audioCtx ? audioCtx.sampleRate : bridgeSampleRate;
+        if (!(sr > 0) || !Number.isFinite(expectedMidi)) return null;
+        _rescueCalls++;
+        const avOffsetSec = (hw.getAvOffset ? hw.getAvOffset() / 1000 : 0);
+        // The note's audio sits at hw time = noteTime - avOffset + latency
+        // (inverse of the match clock t = hwTime + avOffset - latency).
+        const noteHwTime = noteTime - avOffsetSec + latencyOffset;
+        const samplesBack = Math.round((_rescueBufEndT - noteHwTime) * sr);
+        const center = _rescueBuf.length - samplesBack;
+        // Scan CENTER-OUTWARD (0, +STEP, -STEP, …) and take the first hit; on a
+        // repeated note center-outward prefers the on-time instance. ±160 ms in
+        // 80 ms steps → 5 windows (0, ±80, ±160); the 340 ms windows overlap by
+        // ~260 ms so a mis-timed played note is still caught.
+        const SEARCH = Math.round(0.16 * sr);
+        const STEP = Math.round(0.08 * sr);
+        const maxK = Math.floor(SEARCH / STEP);
+        // Cheap early-out: the 340 ms center window catches any note in ±160 ms
+        // range, so if the center has essentially no band energy the note wasn't
+        // played here — skip the remaining 16384-pt FFTs. Floor sits below the
+        // 0.015 hit gate so a bleed-masked real miss is never skipped.
+        const _RESCUE_SILENT_BAND = 0.008;
+        let r = null;
+        for (let k = 0; k <= maxK && !r; k++) {
+            for (const d of (k === 0 ? [0] : [k * STEP, -k * STEP])) {
+                const start = center + d - (_RESCUE_WIN >> 1);
+                if (start < 0 || start + _RESCUE_WIN > _rescueBuf.length) continue;
+                const win = _rescueBuf.subarray(start, start + _RESCUE_WIN);
+                _rescueWindows++;
+                const cand = _ndConstraintCheckString(
+                    win, sr, cn.s, cn.f, currentArrangement, currentStringCount,
+                    tuningOffsets, capo, _ND_VERIFY_PITCH_CENTS_BASS, 0.015
+                );
+                if (cand && cand.hit) { r = cand; break; }
+                // After the center window, bail the whole scan if silent.
+                if (k === 0 && cand && cand.bandEnergy < _RESCUE_SILENT_BAND) {
+                    _rescueSkippedSilent++;
+                    return null;
+                }
+            }
+        }
+        if (!r) return null;
+        _rescueHits++;
+        // Report on-pitch: the 60c band-verify gate is the bass standard; the
+        // tighter pitchHitThreshold is too fine for coarse low bins.
+        const detMidi = Number.isFinite(r.centsError) ? expectedMidi + r.centsError / 100 : expectedMidi;
+        return makeMatchedJudgment(cn, noteTime, noteTime, expectedMidi, detMidi, 1, { pitchError: 0, rescued: true });
+    }
+
+    // Single-FFT miss analysis for a CONCEDED bass miss: read the 16384-pt
+    // rescue window ONCE and derive all three coaching signals — per-string
+    // energy (wrong-string / ambient), mute-fail (open string rang instead of
+    // the fretted note), and note-presence (the expected note's harmonic comb
+    // is there → the player DID play it, the detector just dropped it). Firing
+    // three separate 16384-pt FFTs per miss starved the render loop (the
+    // highway-stutter regression), so they share one FFT. Bass only.
+    function _missAnalysisAtNote(chartNote, noteTime) {
+        const blank = { stringEnergy: null, muteFail: false, presenceComb: 0 };
+        if (currentArrangement !== 'bass' || _rescueBuf.length < _RESCUE_WIN) return blank;
+        const sr = audioCtx ? audioCtx.sampleRate : bridgeSampleRate;
+        if (!(sr > 0)) return blank;
+        const avOffsetSec = (hw.getAvOffset ? hw.getAvOffset() / 1000 : 0);
+        const noteHwTime = noteTime - avOffsetSec + latencyOffset;
+        const samplesBack = Math.round((_rescueBufEndT - noteHwTime) * sr);
+        const center = _rescueBuf.length - samplesBack;
+        const start = center - (_RESCUE_WIN >> 1);
+        if (start < 0 || start + _RESCUE_WIN > _rescueBuf.length) return blank;
+        const win = _rescueBuf.subarray(start, start + _RESCUE_WIN);
+        try {
+            const { magnitudes, binHz } = _ndFftMagnitude(win, sr);   // the ONE FFT
+            const total = _ndTotalEnergy(magnitudes);
+            // Per-string energy — the wrong-string / ambient signal on a miss.
+            const stringEnergy = new Array(currentStringCount);
+            for (let s = 0; s < currentStringCount; s++) {
+                const [lo, hi] = _ndStringBandHz(s, currentArrangement, currentStringCount, tuningOffsets, capo);
+                stringEnergy[s] = Math.round(_ndBandEnergy(magnitudes, binHz, lo, hi, total) * 1000) / 1000;
+            }
+            // Charted string's expected pitch + band peak — shared by both checks.
+            const expectedMidi = _ndMidiFromStringFret(chartNote.s, chartNote.f, currentArrangement, currentStringCount, tuningOffsets, capo);
+            const expHz = 440 * Math.pow(2, (expectedMidi - 69) / 12);
+            const [loHz, hiHz] = _ndStringBandHz(chartNote.s, currentArrangement, currentStringCount, tuningOffsets, capo);
+            const loBin = Math.max(0, Math.floor(loHz / binHz));
+            const hiBin = Math.min(magnitudes.length - 1, Math.ceil(hiHz / binHz));
+            let bandPk = 0;
+            for (let k = loBin; k <= hiBin; k++) if (magnitudes[k] > bandPk) bandPk = magnitudes[k];
+            // Mute-fail (fretted notes only): did the open string ring instead?
+            let muteFail = false;
+            if (Number.isFinite(chartNote.f) && chartNote.f > 0) {
+                const openMidi = _ndMidiFromStringFret(chartNote.s, 0, currentArrangement, currentStringCount, tuningOffsets, capo);
+                const openHz = 440 * Math.pow(2, (openMidi - 69) / 12);
+                muteFail = _ndDetectMuteFail(magnitudes, binHz, expHz, openHz, bandPk);
+            }
+            // Presence: was the expected note actually there (player played it)?
+            const presenceComb = _ndHarmonicCombCount(magnitudes, binHz, expHz, bandPk);
+            return { stringEnergy, muteFail, presenceComb };
+        } catch (_) { return blank; }
+    }
+
+    // Was the player SILENT at a missed note's time (stopped / didn't play),
+    // vs the detector's low-string blind spot (string ringing, pitch unresolved)?
+    // Level samples are in visual time (songT = getTime + avOffset); the note's
+    // audio time maps to visual time + latencyOffset. true/false, or null if no
+    // level telemetry covers the window.
+    function _wasSilentAtNote(noteTime) {
+        return _ndIsSilentWindow(_ndLevelSamples, noteTime + latencyOffset, _ND_LEVEL_WIN_HALF, _ND_SILENCE_THRESHOLD);
+    }
+
     function makeMissJudgment(cn, noteTime, t, expectedMidi, extra = {}) {
         return _ndMakeJudgment({
             matched: false,
@@ -5128,6 +5409,13 @@ function createNoteDetector(options = {}) {
             tt:  Number.isFinite(judgment.totalStrings) ? judgment.totalStrings : undefined,
             sc:  Number.isFinite(judgment.score) ? +judgment.score.toFixed(3) : undefined,
             tf:  _diagTechFlags(nn),
+            // Conceded-miss attribution (coaching): mute-fail (open string rang
+            // instead of the fret), note-present + comb count (player played it,
+            // detector dropped it → tool miss vs flub), silent (stopped here).
+            mf:  judgment.muteFail ? true : undefined,
+            np:  judgment.notePresent ? true : undefined,
+            nc:  Number.isFinite(judgment.presenceComb) ? judgment.presenceComb : undefined,
+            sil: judgment.silent ? true : undefined,
         };
         if (_diagEvents.length < _DIAG_EVENT_CAP) {
             _diagEvents.push(eventObj);
@@ -5975,6 +6263,10 @@ function createNoteDetector(options = {}) {
         // this renderer-side retire scan is superseded. The browser path —
         // and any desktop session on a downlevel addon — still relies on it.
         if (_ndUsingEngineVerifier) return;
+        // Reset the per-tick rescue-FFT budget (see _RESCUE_WINDOWS_PER_TICK).
+        // checkNote spends against this; once exhausted, further conceded bass
+        // misses this tick retire as plain misses instead of running FFTs.
+        let rescueWinBudget = _RESCUE_WINDOWS_PER_TICK;
         const avOffsetSec = (hw.getAvOffset ? hw.getAvOffset() / 1000 : 0);
         const t = hw.getTime() + avOffsetSec - latencyOffset;
         const tolerance = timingTolerance;
@@ -6007,6 +6299,22 @@ function createNoteDetector(options = {}) {
                 const expectedMidi = _ndMidiFromStringFret(
                     chartNote.s, chartNote.f, currentArrangement, currentStringCount, tuningOffsets, capo
                 );
+                // Bass long-window rescue before conceding: re-check the note's
+                // pitch on a 16384-pt window centered on its expected time. A
+                // correctly-played low note the live frame couldn't resolve is
+                // credited here instead of retiring as a miss. Skipped once the
+                // per-tick FFT budget is spent (batch retire) — the miss still
+                // retires, just without the additive rescue upgrade.
+                let rescued = null;
+                if (rescueWinBudget > 0) {
+                    const winBefore = _rescueWindows;
+                    rescued = _tryBassRescue(chartNote, noteTime, expectedMidi);
+                    rescueWinBudget -= (_rescueWindows - winBefore);
+                }
+                if (rescued) {
+                    _ndVerifyFailSnap.delete(key);
+                    recordJudgment(key, rescued);
+                } else {
                 const snap = _ndVerifyFailSnap.get(key);
                 _ndLogVerifierRejectOnce(key, {
                     reason: snap ? 'STRING_VERIFY_FAIL' : 'RETIRE_NO_MATCH',
@@ -6019,10 +6327,26 @@ function createNoteDetector(options = {}) {
                         : null,
                 });
                 _ndVerifyFailSnap.delete(key);
-                recordJudgment(
-                    key,
-                    makeMissJudgment(chartNote, noteTime, t, expectedMidi)
-                );
+                const missJudgment = makeMissJudgment(chartNote, noteTime, t, expectedMidi);
+                // ONE FFT of the note's rescue window feeds all three signals
+                // coaching reads on a miss: per-string energy (wrong-string /
+                // ambient), mute-fail (open string rang instead of the fret),
+                // and note-presence (player played it → detector blind-spot).
+                // Behind the same per-tick budget as the rescue above; under a
+                // batch retire the miss simply lands with no attribution.
+                let an = { stringEnergy: null, muteFail: false, presenceComb: 0 };
+                if (rescueWinBudget > 0) {
+                    an = _missAnalysisAtNote(chartNote, noteTime);
+                    rescueWinBudget -= 1;
+                }
+                if (an.stringEnergy) missJudgment.stringEnergy = an.stringEnergy;
+                if (an.muteFail) missJudgment.muteFail = true;
+                if (an.presenceComb >= _ND_PRESENCE_MIN_COMB) missJudgment.notePresent = true;
+                if (an.presenceComb > 0) missJudgment.presenceComb = an.presenceComb;
+                // Player silent here (stopped / didn't play) vs blind-spot.
+                if (_wasSilentAtNote(noteTime) === true) missJudgment.silent = true;
+                recordJudgment(key, missJudgment);
+                }
             }
         };
 
@@ -11854,6 +12178,15 @@ function createNoteDetector(options = {}) {
         _scoreLedger.clear();
         _susActiveUntil.clear();
         _chordLastResult.clear();
+        _rescueBuf = new Float32Array(0);
+        _rescueBufEndT = 0;
+        // Zero the rescue counters too — the diagnostic summary reports them
+        // alongside per-song hits/misses, so leaving them would leak
+        // session-cumulative rescue counts into each song's report.
+        _rescueCalls = 0;
+        _rescueWindows = 0;
+        _rescueHits = 0;
+        _rescueSkippedSilent = 0;
         _ndVerifierRejects.length = 0;
         _ndRejectDedup.clear();
         _ndVerifyFailSnap.clear();
@@ -13909,6 +14242,7 @@ function createNoteDetector(options = {}) {
                 best_streak: bestStreak,
                 singles: { hits: _diagSingles.hits, misses: _diagSingles.misses, accuracy: sAcc },
                 chords:  { hits: _diagChords.hits,  misses: _diagChords.misses,  accuracy: cAcc },
+                rescue: { calls: _rescueCalls, windows: _rescueWindows, hits: _rescueHits, skipped_silent: _rescueSkippedSilent },
                 // Clean vs loose hit split — low clean_rate next to high
                 // accuracy = sloppy-but-technically-hit.
                 clean_hits: _diagClean.clean,

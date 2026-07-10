@@ -206,7 +206,12 @@ try {
             'frame-size':            { type: 'string', default: '1024' },
             'sample-rate':           { type: 'string', default: '44100' },
             'arrangement':           { type: 'string', default: 'guitar' },
-            'string-count':          { type: 'string', default: '6' },
+            // No default: when unset we derive the string count from the chart
+            // the way the app's _syncChartStateFromHw does — arrangement XML
+            // pads bass tunings to six entries, so a bare default of 6 would
+            // score a 4-string bass against a 6-string (low-B) tuning and shift
+            // every note down a fourth. Pass --string-count only to override.
+            'string-count':          { type: 'string' },
             'av-offset-ms':          { type: 'string', default: '0' },
             verbose:                 { type: 'boolean', default: false },
             help:                    { type: 'boolean', default: false },
@@ -278,7 +283,11 @@ const method        = args.method;
 const sampleRate    = POS_INT(args['sample-rate'], 'sample-rate');
 const frameSize     = POS_INT(args['frame-size'], 'frame-size');
 const arrangement   = args.arrangement;
-const stringCount   = POS_INT(args['string-count'], 'string-count');
+// Explicit override only — the effective count is derived from the chart
+// below (after it loads), mirroring the app so the benchmark measures what
+// the browser actually does. See the --string-count manifest note.
+const stringCountArg = args['string-count'] !== undefined
+    ? POS_INT(args['string-count'], 'string-count') : null;
 const avOffsetMs    = NUM(args['av-offset-ms'], 'av-offset-ms');
 // In-app slider ranges (screen.js createNoteDetector settings loader):
 //   pitchTolerance      10..100 cents
@@ -333,6 +342,21 @@ try {
     process.stderr.write(`failed to read chart ${args.chart}: ${e.message}\n`);
     process.exit(2);
 }
+// Effective string count, mirroring the app's _syncChartStateFromHw:
+//   1. explicit --string-count wins;
+//   2. else use tuning.length when consistent with the arrangement
+//      (bass-4/5, guitar-6/7/8) — this preserves 5-string bass and
+//      7/8-string guitar;
+//   3. else the per-arrangement default (bass 4, guitar 6) — this is the
+//      case the arrangement-XML bass-padded-to-6 tuning falls into, so a
+//      4-string bass is scored against E-A-D-G, not a 6-string B-E-A-D-G-C.
+const _tuneLen = Array.isArray(chart.tuning) && chart.tuning.length ? chart.tuning.length : null;
+const _consistent = arrangement === 'bass'
+    ? (_tuneLen === 4 || _tuneLen === 5)
+    : (_tuneLen === 6 || _tuneLen === 7 || _tuneLen === 8);
+const stringCount = stringCountArg != null
+    ? stringCountArg
+    : (_consistent ? _tuneLen : (arrangement === 'bass' ? 4 : 6));
 const chartTuning = Array.isArray(chart.tuning) && chart.tuning.length
     ? chart.tuning.slice()
     : new Array(stringCount).fill(0);
