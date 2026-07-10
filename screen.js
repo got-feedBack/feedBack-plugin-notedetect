@@ -1314,8 +1314,14 @@ function _ndMakeJudgment(opts) {
     // single-string sample there; the chord scorer already gated the hit).
     const cleanTimingMs = Number.isFinite(o.cleanTimingThresholdMs) ? o.cleanTimingThresholdMs : timingThresholdMs;
     const cleanPitchCents = Number.isFinite(o.cleanPitchThresholdCents) ? o.cleanPitchThresholdCents : pitchThresholdCents;
+    // Skip the clean *pitch* sub-grade when the pitch band was intentionally
+    // widened (bend / slide / harmonic — caller passed a widened
+    // pitchThresholdCents). The pitch is off-chart on purpose, so flagging it
+    // looseReason:'pitch' would be telemetry noise. Mirrors the chord skip
+    // (null pitchError). Clean *timing* still applies.
+    const skipCleanPitch = isChord || !!o.pitchWindowWidened;
     const { clean, looseReason } = _ndGradeClean(
-        hit, timingError, isChord ? null : pitchError, cleanTimingMs, cleanPitchCents);
+        hit, timingError, skipCleanPitch ? null : pitchError, cleanTimingMs, cleanPitchCents);
     return {
         chartNote: o.chartNote || o.note || null,
         note: o.note || null,
@@ -4755,6 +4761,10 @@ function createNoteDetector(options = {}) {
             // hit is not gated on a moving target.
             pitchThresholdCents: Number.isFinite(extra.pitchThresholdCents)
                 ? extra.pitchThresholdCents : pitchHitThreshold,
+            // Same widened-window signal drives the clean *pitch* skip: an
+            // intentionally off-chart bend/slide/harmonic must not be graded
+            // looseReason:'pitch'. Clean timing still applies.
+            pitchWindowWidened: Number.isFinite(extra.pitchThresholdCents),
             cleanTimingThresholdMs: cleanTimingThreshold * 1000,
             cleanPitchThresholdCents: cleanPitchThreshold,
             hitStrings: extra.hitStrings,
@@ -16758,8 +16768,12 @@ function createNoteDetector(options = {}) {
                 if (Number.isFinite(s.pitchHitThreshold))   pitchHitThreshold   = s.pitchHitThreshold;
                 if (Number.isFinite(s.timingTolerance))     timingTolerance     = s.timingTolerance;
                 if (Number.isFinite(s.timingHitThreshold))  timingHitThreshold  = s.timingHitThreshold;
-                if (Number.isFinite(s.cleanTimingThreshold)) cleanTimingThreshold = s.cleanTimingThreshold;
-                if (Number.isFinite(s.cleanPitchThreshold))  cleanPitchThreshold  = s.cleanPitchThreshold;
+                // Floor here as the runtime path does (see ~L2378): a
+                // programmatic 0/negative clean threshold would otherwise be
+                // accepted, degenerating the clean band. Upper clamp (≤ hit
+                // threshold) is re-enforced at the end of this setter.
+                if (Number.isFinite(s.cleanTimingThreshold)) cleanTimingThreshold = Math.max(0.01, s.cleanTimingThreshold);
+                if (Number.isFinite(s.cleanPitchThreshold))  cleanPitchThreshold  = Math.max(1, s.cleanPitchThreshold);
                 if (Number.isFinite(s.chordTimingHitThreshold)) {
                     // Clamp here too — _harness is a Node-only entrypoint
                     // (harness.js + regression.js drive scoring through it)
@@ -16787,6 +16801,14 @@ function createNoteDetector(options = {}) {
                 if (cleanTimingThreshold > timingHitThreshold) cleanTimingThreshold = timingHitThreshold;
                 if (cleanPitchThreshold > pitchHitThreshold)   cleanPitchThreshold = pitchHitThreshold;
             },
+            // Read back the (clamped) tolerance/threshold state so a
+            // headless caller / test can assert the clamps held.
+            getSettings: () => ({
+                pitchTolerance, pitchHitThreshold,
+                timingTolerance, timingHitThreshold,
+                chordTimingHitThreshold,
+                cleanTimingThreshold, cleanPitchThreshold,
+            }),
         },
     };
 

@@ -273,6 +273,8 @@ function loadDetectionCore({ sandboxBeforeRun } = {}) {
                 notes: r.notes ? r.notes.map(toSF) : r.notes,
                 chord: r.chord,
                 hit: r.hit,
+                clean: r.clean,
+                looseReason: r.looseReason,
                 timingState: r.timingState,
                 timingError: r.timingError,
                 pitchState: r.pitchState,
