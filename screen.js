@@ -1855,8 +1855,13 @@ function _ndConstraintCheckString(
     // or neighbour ringing under the fretted note — so a present low note gets
     // rejected. When the cents check fails AND the expected fundamental is low,
     // fall back to confirming the EXPECTED note's harmonic comb directly. Purely
-    // additive: it can only turn a miss into a hit, never the reverse, so guitar
-    // and higher-bass behaviour is byte-identical. See _ND_HARMONIC_FALLBACK_*.
+    // additive (it can only turn a miss into a hit, never the reverse) and gated
+    // on a low expectedHz, so this fallback never fires for guitar. NB the
+    // branch's rescue + miss-attribution are all bass-gated, but the per-frame
+    // level/diagnostic recording it feeds (processFrame level history,
+    // _wasSilentAtNote, _ndStrikeLevelContext) is a deliberate cross-arrangement
+    // change that DOES run on browser guitar — it is diagnostics-only and never
+    // affects guitar hit/miss/score. See _ND_HARMONIC_FALLBACK_*.
     if (!hit && expectedHz <= _ND_HARMONIC_FALLBACK_MAX_HZ
         && _ndHarmonicCoherenceLow(magnitudes, binHz, expectedHz, peakVal)) {
         hit = true;
@@ -2972,6 +2977,17 @@ function createNoteDetector(options = {}) {
     let _rescueBuf = new Float32Array(0);
     let _rescueBufEndT = 0;          // hw time (s) of the newest sample in _rescueBuf
     let _rescueCalls = 0, _rescueWindows = 0, _rescueHits = 0, _rescueSkippedSilent = 0;
+    // Per-tick rescue-FFT budget. One conceded bass miss can fire up to ~5
+    // rescue windows (_tryBassRescue) + 1 attribution FFT (_missAnalysisAtNote),
+    // all 16384-pt. Normal play concedes ~1 miss/tick — well under this. But
+    // after a backward seek / lag spike / drill-loop wrap a whole batch of misses
+    // retires on a single checkMisses tick; unbounded that is hundreds of ms of
+    // synchronous FFT and dropped frames. Cap the windows spent per tick (≈4
+    // misses' worth); once spent, the remaining conceded bass misses this tick
+    // retire as PLAIN misses (no rescue, no attribution). Rescue is purely
+    // additive — it only upgrades a miss to a hit — so one landing a frame late,
+    // or not at all under a storm, is invisible to scoring.
+    const _RESCUE_WINDOWS_PER_TICK = 24;
 
     // Tuning — per-instance so panels can be on different songs.
     // tuningOffsets is resized to match the actual string count on enable();
@@ -5959,6 +5975,10 @@ function createNoteDetector(options = {}) {
         // this renderer-side retire scan is superseded. The browser path —
         // and any desktop session on a downlevel addon — still relies on it.
         if (_ndUsingEngineVerifier) return;
+        // Reset the per-tick rescue-FFT budget (see _RESCUE_WINDOWS_PER_TICK).
+        // checkNote spends against this; once exhausted, further conceded bass
+        // misses this tick retire as plain misses instead of running FFTs.
+        let rescueWinBudget = _RESCUE_WINDOWS_PER_TICK;
         const avOffsetSec = (hw.getAvOffset ? hw.getAvOffset() / 1000 : 0);
         const t = hw.getTime() + avOffsetSec - latencyOffset;
         const tolerance = timingTolerance;
@@ -5994,8 +6014,15 @@ function createNoteDetector(options = {}) {
                 // Bass long-window rescue before conceding: re-check the note's
                 // pitch on a 16384-pt window centered on its expected time. A
                 // correctly-played low note the live frame couldn't resolve is
-                // credited here instead of retiring as a miss.
-                const rescued = _tryBassRescue(chartNote, noteTime, expectedMidi);
+                // credited here instead of retiring as a miss. Skipped once the
+                // per-tick FFT budget is spent (batch retire) — the miss still
+                // retires, just without the additive rescue upgrade.
+                let rescued = null;
+                if (rescueWinBudget > 0) {
+                    const winBefore = _rescueWindows;
+                    rescued = _tryBassRescue(chartNote, noteTime, expectedMidi);
+                    rescueWinBudget -= (_rescueWindows - winBefore);
+                }
                 if (rescued) {
                     _ndVerifyFailSnap.delete(key);
                     recordJudgment(key, rescued);
@@ -6017,7 +6044,13 @@ function createNoteDetector(options = {}) {
                 // coaching reads on a miss: per-string energy (wrong-string /
                 // ambient), mute-fail (open string rang instead of the fret),
                 // and note-presence (player played it → detector blind-spot).
-                const an = _missAnalysisAtNote(chartNote, noteTime);
+                // Behind the same per-tick budget as the rescue above; under a
+                // batch retire the miss simply lands with no attribution.
+                let an = { stringEnergy: null, muteFail: false, presenceComb: 0 };
+                if (rescueWinBudget > 0) {
+                    an = _missAnalysisAtNote(chartNote, noteTime);
+                    rescueWinBudget -= 1;
+                }
                 if (an.stringEnergy) missJudgment.stringEnergy = an.stringEnergy;
                 if (an.muteFail) missJudgment.muteFail = true;
                 if (an.presenceComb >= _ND_PRESENCE_MIN_COMB) missJudgment.notePresent = true;
