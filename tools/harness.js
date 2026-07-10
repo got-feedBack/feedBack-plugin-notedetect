@@ -195,6 +195,12 @@ try {
             // a user passing `--timing-tolerance 0.120` doesn't fail
             // validation against a baked-in chord default of 0.150.
             'chord-timing-hit-threshold': { type: 'string' },
+            // Clean-grade thresholds — no CLI default; the detector's runtime
+            // default (50ms / 12c, clamped <= the hit thresholds) applies when
+            // unset. A hit outside the clean band is graded "loose" (still a
+            // hit) so clean_rate surfaces sloppy-but-technically-hit passes.
+            'clean-timing-threshold': { type: 'string' },
+            'clean-pitch-threshold':  { type: 'string' },
             'chord-hit-ratio':       { type: 'string', default: '0.40' },
             'latency':               { type: 'string', default: '0.080' },
             'frame-size':            { type: 'string', default: '1024' },
@@ -319,6 +325,14 @@ const settings = {
     chordHitRatio:      RATIO_01(args['chord-hit-ratio'], 'chord-hit-ratio'),
     latencyOffset:      RANGE(args['latency'], 'latency', 0, 1),
 };
+// Optional clean-grade overrides — only forward when passed; otherwise the
+// detector's runtime defaults (clamped <= the hit thresholds) apply.
+if (args['clean-timing-threshold'] !== undefined) {
+    settings.cleanTimingThreshold = RANGE(args['clean-timing-threshold'], 'clean-timing-threshold', 0.01, timingHitThreshold);
+}
+if (args['clean-pitch-threshold'] !== undefined) {
+    settings.cleanPitchThreshold = RANGE(args['clean-pitch-threshold'], 'clean-pitch-threshold', 1, pitchHitThreshold);
+}
 
 // ── Load chart ──────────────────────────────────────────────────────
 let chart;

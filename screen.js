@@ -1254,6 +1254,25 @@ async function _ndShareCardClick(btn, action, data, overlayEl) {
     setTimeout(() => { if (btn.isConnected) { btn.textContent = orig; btn.disabled = false; } }, 1600);
 }
 
+// A HIT is binary — a note 95 ms late still lands inside a 150 ms window and
+// counts identical to a dead-on hit, which inflates scores and produces false
+// "you passed" verdicts. `clean` is the tighter grade the coach keys off of to
+// surface "technically hit but loose" spots WITHOUT reclassifying them as
+// misses (which would resurrect the bass low-string false-misses the wide
+// windows were widened to avoid). The clean thresholds are always <= the hit
+// thresholds (clamped on load), so the clean band lives strictly inside the hit
+// window. `looseReason` names the offending axis so the coach can label the
+// drill (tight timing vs intonation).
+function _ndGradeClean(hit, timingError, pitchError, cleanTimingMs, cleanPitchCents) {
+    if (!hit) return { clean: false, looseReason: null };
+    const tLoose = Number.isFinite(timingError) && Number.isFinite(cleanTimingMs)
+        && Math.abs(timingError) > cleanTimingMs;
+    const pLoose = Number.isFinite(pitchError) && Number.isFinite(cleanPitchCents)
+        && Math.abs(pitchError) > cleanPitchCents;
+    if (!tLoose && !pLoose) return { clean: true, looseReason: null };
+    return { clean: false, looseReason: (tLoose && pLoose) ? 'both' : (tLoose ? 'timing' : 'pitch') };
+}
+
 function _ndMakeJudgment(opts) {
     const o = opts || {};
     const matched = !!o.matched;
@@ -1304,12 +1323,29 @@ function _ndMakeJudgment(opts) {
     const hit = isChord
         ? (matched && timingState === 'OK')
         : (timingState === 'OK' && (pitchState === 'OK' || pitchState === null));
+    // Tighter quality grade inside the hit window — defaults to the hit
+    // thresholds (so a caller that doesn't pass clean thresholds sees every
+    // hit as clean → no behaviour change). Real call sites pass the stricter
+    // clean thresholds. Pitch grade is skipped for chords (pitchError is a
+    // single-string sample there; the chord scorer already gated the hit).
+    const cleanTimingMs = Number.isFinite(o.cleanTimingThresholdMs) ? o.cleanTimingThresholdMs : timingThresholdMs;
+    const cleanPitchCents = Number.isFinite(o.cleanPitchThresholdCents) ? o.cleanPitchThresholdCents : pitchThresholdCents;
+    // Skip the clean *pitch* sub-grade when the pitch band was intentionally
+    // widened (bend / slide / harmonic — caller passed a widened
+    // pitchThresholdCents). The pitch is off-chart on purpose, so flagging it
+    // looseReason:'pitch' would be telemetry noise. Mirrors the chord skip
+    // (null pitchError). Clean *timing* still applies.
+    const skipCleanPitch = isChord || !!o.pitchWindowWidened;
+    const { clean, looseReason } = _ndGradeClean(
+        hit, timingError, skipCleanPitch ? null : pitchError, cleanTimingMs, cleanPitchCents);
     return {
         chartNote: o.chartNote || o.note || null,
         note: o.note || null,
         notes: o.notes || null,
         chord: !!o.chord,
         hit,
+        clean,
+        looseReason,
         timingState,
         timingError,
         pitchState,
@@ -2237,6 +2273,17 @@ function _ndEncodeWavPcm16(chunks, sampleRate) {
     return buf;
 }
 
+// Pure health predicate for the scoring watchdog. Extracted so the
+// enabled/bridge/external/mic-callback decision is unit-testable without the
+// DOM + play-timing the full tick needs. Healthy when detection is on AND one
+// of the scoring inputs is live: the desktop bridge, an external MIDI provider
+// (keys/piano — opens no audio graph, so cbFresh is permanently false there and
+// _extActive must count as healthy or the watchdog spuriously banners + reopens
+// the mic against MIDI scoring), or a fresh mic callback.
+function _ndScoringHealthy(enabled, usingBridge, extActive, cbFresh) {
+    return !!(enabled && (usingBridge || extActive || cbFresh));
+}
+
 function createNoteDetector(options = {}) {
     const opts = options || {};
     // Highway is resolved lazily. A caller can pass `highway` in
@@ -2333,6 +2380,10 @@ function createNoteDetector(options = {}) {
     // than single notes.
     let chordTimingHitThreshold = 0.150;
     let pitchHitThreshold = 20;
+    // Clean-grade thresholds — always <= the hit thresholds (clamped on load),
+    // so the clean band lives strictly inside the hit window. See _ndGradeClean.
+    let cleanTimingThreshold = 0.050;   // 50 ms
+    let cleanPitchThreshold = 12;       // cents
     let showTimingErrors = true;
     let showPitchErrors = true;
     // slopsmith#254 — the full-screen green/red edge flash on hit/miss.
@@ -2450,6 +2501,11 @@ function createNoteDetector(options = {}) {
             // candidate window, not pushing past it).
             if (s.chordTimingHitThreshold !== undefined) chordTimingHitThreshold = Math.max(timingHitThreshold, Math.min(timingTolerance, s.chordTimingHitThreshold));
             if (s.pitchHitThreshold !== undefined) pitchHitThreshold = Math.max(5, Math.min(pitchTolerance, s.pitchHitThreshold));
+            if (s.cleanTimingThreshold !== undefined) cleanTimingThreshold = Math.max(0.01, Math.min(timingHitThreshold, s.cleanTimingThreshold));
+            if (s.cleanPitchThreshold !== undefined) cleanPitchThreshold = Math.max(1, Math.min(pitchHitThreshold, s.cleanPitchThreshold));
+            // Clean thresholds live strictly inside the hit window.
+            if (cleanTimingThreshold > timingHitThreshold) cleanTimingThreshold = timingHitThreshold;
+            if (cleanPitchThreshold > pitchHitThreshold)   cleanPitchThreshold = pitchHitThreshold;
             if (s.showTimingErrors !== undefined) showTimingErrors = !!s.showTimingErrors;
             if (s.showPitchErrors !== undefined) showPitchErrors = !!s.showPitchErrors;
             if (s.edgeFlash !== undefined) edgeFlashEnabled = !!s.edgeFlash;
@@ -2562,6 +2618,23 @@ function createNoteDetector(options = {}) {
     let inputPeak = 0;
     let peakDecay = 0;
 
+    // Input-dropout watchdog (ported from slopsmith note_detect 1.39.1). The
+    // "played a whole song into the void" failure: the interface drops the input
+    // (USB glitch, driver, audio focus) or the detector never came up, and
+    // nothing scores — invisible until the end-of-song summary. We stamp every
+    // audio callback and, while detection is wanted and the song is playing,
+    // alert + auto-recover within ~2s if the callbacks stop. Browser-only (the
+    // desktop bridge owns its own input health).
+    let _lastAudioCbT = 0;            // Date.now() of the last onaudioprocess
+    let _maxCbGapMs = 0;              // worst inter-callback gap this play (starvation gauge)
+    let _scoringStalled = false;      // banner state (not scoring while playing)
+    let _wdPlayStartT = 0;            // when the current playing+wantsDetect stretch began
+    let _inputLost = false;           // track ended/muted (device dropped)
+    let _lastInputRecover = 0;        // throttle re-acquire so a glitch storm can't thrash
+    let scoringWatchdog = null;       // persistent setInterval handle (cleared in destroy)
+    let _healthTrack = null;          // the live input MediaStreamTrack (for dropout telemetry)
+    let _healthHandlers = null;       // { track, ended, mute, unmute } — stored so we can detach before rebinding
+
     // Calibration Wizard v2 — system setup only (safe settings; no scoring thresholds)
     let _calWizardEl = null;
     let _calWizardTick = null;
@@ -2671,6 +2744,9 @@ function createNoteDetector(options = {}) {
     };
     const _diagSingles = { hits: 0, misses: 0 };
     const _diagChords  = { hits: 0, misses: 0 };
+    // Clean vs loose HITS — a low clean_rate next to high accuracy means
+    // sloppy-but-technically-hit (the honest-pass signal).
+    const _diagClean = { clean: 0, loose: 0 };
     // Per-string. 8 covers 4/5/6/7/8-string arrangements without resizing.
     const _diagPerString = Array.from({ length: 8 }, () => ({ hits: 0, misses: 0 }));
     // Signed errors for matched judgments (excludes pure misses where no
@@ -4019,6 +4095,8 @@ function createNoteDetector(options = {}) {
 
             sourceNode = audioCtx.createMediaStreamSource(stream);
             const streamChannels = sourceNode.channelCount;
+            // Watch this stream's track for a mid-session interface drop.
+            try { _bindStreamHealth(stream); } catch (_) {}
 
             gainNode = audioCtx.createGain();
             gainNode.gain.value = inputGain;
@@ -4045,6 +4123,16 @@ function createNoteDetector(options = {}) {
             pendingBuffer = null;
 
             processor.onaudioprocess = (e) => {
+                // Heartbeat: stamp every callback (even when disabled) so the
+                // scoring watchdog can tell a stalled audio graph from a quiet
+                // instrument. Also track the worst inter-callback gap — the
+                // direct measure of main-thread starvation. Cheap; runs ~20×/s.
+                const _cbNow = (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0;
+                if (_lastAudioCbT) {
+                    const gap = _cbNow - _lastAudioCbT;
+                    if (gap > _maxCbGapMs) _maxCbGapMs = gap;
+                }
+                _lastAudioCbT = _cbNow;
                 if (!enabled) return;
                 const input = e.inputBuffer.getChannelData(0);
                 const prev = accumBuffer;
@@ -4107,6 +4195,193 @@ function createNoteDetector(options = {}) {
         }
     }
 
+    // Watch the live input MediaStreamTrack for the interface dropping out
+    // mid-session (USB/driver glitch, audio focus loss). `ended`/`mute` mark the
+    // input lost + surface it (not left guessing why nothing scored) and, after
+    // a short grace for the device to self-heal, re-acquire ONCE — throttled so
+    // a flapping device can't thrash getUserMedia. `unmute` clears it.
+    // Detach the ended/mute/unmute listeners bound by a previous
+    // _bindStreamHealth. On the shared externalStream path the same track
+    // survives restart cycles, so without this each startAudio() would stack
+    // another set of closures on it and fire markLost() N times per drop.
+    function _unbindStreamHealth() {
+        if (!_healthHandlers) return;
+        const { track, ended, mute, unmute } = _healthHandlers;
+        try {
+            track.removeEventListener('ended', ended);
+            track.removeEventListener('mute', mute);
+            track.removeEventListener('unmute', unmute);
+        } catch (_) { /* track event API unavailable */ }
+        _healthHandlers = null;
+    }
+
+    function _bindStreamHealth(s) {
+        if (!s || typeof s.getAudioTracks !== 'function') return;
+        const track = s.getAudioTracks()[0];
+        if (!track) return;
+        // Drop any prior binding first so restart cycles don't accumulate
+        // duplicate listeners on a reused track.
+        _unbindStreamHealth();
+        _healthTrack = track;   // captured for the dropout-telemetry record
+        const markLost = (why) => {
+            if (_inputLost || !enabled) return;
+            _inputLost = true;
+            console.warn(`[note_detect] input ${why} — the audio interface dropped the input stream`);
+            try { updateButton(); } catch (_) {}
+            setTimeout(() => {
+                if (!enabled || !_inputLost) return;
+                const now = (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0;
+                if (now - _lastInputRecover < 4000) return;
+                _lastInputRecover = now;
+                console.warn('[note_detect] re-acquiring input after drop');
+                try { restartAudio(); } catch (_) {}
+            }, 1500);
+        };
+        const onEnded = () => markLost('ended');
+        const onMute = () => markLost('muted');
+        const onUnmute = () => {
+            if (!_inputLost) return;
+            _inputLost = false;
+            try { updateButton(); } catch (_) {}
+        };
+        try {
+            track.addEventListener('ended', onEnded);
+            track.addEventListener('mute', onMute);
+            track.addEventListener('unmute', onUnmute);
+            _healthHandlers = { track, ended: onEnded, mute: onMute, unmute: onUnmute };
+        } catch (_) { /* track event API unavailable */ }
+    }
+
+    // Scoring watchdog. Bound ONCE at construction (default singleton), NOT
+    // inside startAudio: the worst failure (a getUserMedia race that makes
+    // startAudio return false and silently turns Detect off) happens precisely
+    // when startAudio never succeeds, so a watchdog created there would never
+    // run for it. Instead this keys on intent: the user wants detection AND the
+    // song is playing, but nothing is scoring — covering BOTH a never-started
+    // detector and a mid-play input drop, recovering each the right way.
+    function _bindScoringWatchdog() {
+        if (!isDefault || scoringWatchdog) return;
+        scoringWatchdog = setInterval(_scoringWatchdogTick, 1000);
+        // Don't pin the Node event loop open in tests (no-op in the browser).
+        if (scoringWatchdog && typeof scoringWatchdog.unref === 'function') scoringWatchdog.unref();
+    }
+
+    function _scoringWatchdogTick() {
+        const now = (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0;
+        // In split mode the default singleton is suppressed — a panel owns
+        // capture. Without this guard the watchdog would call enable() on the
+        // suppressed default and bring the main HUD/mic back on top of P1.
+        // Mirrors the check in _reArmOnSongLoaded() and construct-time auto-enable.
+        if (typeof window !== 'undefined' && window.__ndSuppressDefault) {
+            _wdPlayStartT = 0; _clearScoringStall(); return;
+        }
+        const playing = !!(window.slopsmith && window.slopsmith.isPlaying);
+        // Only meaningful while playing AND the user wants detection on.
+        if (!playing || !detectPreference) { _wdPlayStartT = 0; _clearScoringStall(); return; }
+        if (!_wdPlayStartT) { _wdPlayStartT = now; _maxCbGapMs = 0; }  // fresh play: reset starvation gauge
+        // Grace: let enable()/startAudio come up after Play before judging.
+        if (now - _wdPlayStartT < 2500) return;
+        // Healthy = detection enabled AND the audio callback fired recently. The
+        // bridge path doesn't use onaudioprocess, so treat enabled-on-bridge as
+        // healthy — its own input handling owns that case.
+        const cbFresh = (now - _lastAudioCbT) < 1800;
+        if (_ndScoringHealthy(enabled, usingDesktopBridge, _extActive, cbFresh)) { _clearScoringStall(); return; }
+        // Keys/piano arrangements are scored by an external MIDI provider, never
+        // the mic. A keys song idle-waiting for its provider to bind is legitimately
+        // enabled=false (enableImpl bails without opening the mic) — not a dropped
+        // input. The _extWatchOpen watcher owns (re)binding, so never banner or
+        // re-open the mic here regardless of enabled/_extActive state.
+        if (_ndIsExternalScoredArrangement()) { _clearScoringStall(); return; }
+        // Wants detection, song playing, but not scoring. Surface loudly NOW
+        // (seconds in, not at song end) and auto-recover the right way:
+        // re-enable if Detect fell off, or re-acquire the input if it's
+        // enabled-but-dead. Throttled.
+        if (!_scoringStalled) {
+            _scoringStalled = true;
+            _inputLost = true;
+            console.warn(`[note_detect] scoring watchdog: playing + detect wanted, but not scoring (enabled=${enabled}, cbAgeMs=${now - _lastAudioCbT}) — recovering`);
+            try { updateButton(); } catch (_) {}
+            try { _showScoringStallBanner(); } catch (_) {}
+            try { _logInputDropout(now - _lastAudioCbT); } catch (_) {}
+        }
+        if (now - _lastInputRecover >= 4000) {
+            _lastInputRecover = now;
+            if (!enabled) {
+                console.warn('[note_detect] scoring watchdog: re-enabling detection');
+                try { Promise.resolve(enable()).catch(() => {}); } catch (_) {}
+            } else {
+                console.warn('[note_detect] scoring watchdog: re-acquiring input');
+                try { restartAudio(); } catch (_) {}
+            }
+        }
+    }
+
+    function _clearScoringStall() {
+        if (!_scoringStalled) return;
+        _scoringStalled = false;
+        _inputLost = false;
+        try { updateButton(); } catch (_) {}
+        try { _hideScoringStallBanner(); } catch (_) {}
+    }
+
+    // A loud banner the moment scoring goes dead mid-play — caught in seconds,
+    // not at the end-of-song summary. Self-heals (auto-reconnect above); a
+    // manual button is offered in case the device needs a kick.
+    function _showScoringStallBanner() {
+        let banner = instanceRoot.querySelector('.nd-scoring-stall');
+        if (!banner) {
+            banner = document.createElement('div');
+            banner.className = 'nd-scoring-stall fixed top-3 left-1/2 -translate-x-1/2 z-[300] flex items-center gap-3 bg-red-900/95 border-2 border-red-500 rounded-xl px-4 py-2.5 shadow-2xl text-sm';
+            banner.innerHTML = '<span class="text-red-100 font-semibold">⚠ Detect is ON but not hearing your instrument — input dropped. Reconnecting…</span>'
+                + '<button class="nd-scoring-stall-retry px-2 py-1 bg-red-700 hover:bg-red-600 rounded text-xs text-white">Reconnect now</button>';
+            instanceRoot.appendChild(banner);
+            const retry = banner.querySelector('.nd-scoring-stall-retry');
+            if (retry) retry.onclick = () => { try { restartAudio(); } catch (_) {} };
+        }
+        banner.style.display = '';
+    }
+
+    function _hideScoringStallBanner() {
+        const banner = instanceRoot.querySelector('.nd-scoring-stall');
+        if (banner) banner.remove();
+    }
+
+    // Dropout telemetry — captures the discriminating state at the moment
+    // scoring went dead so a single occurrence settles rig-vs-program without a
+    // replay (audio_ctx_state parked = OS/rig; track ended/muted = device
+    // dropped; live + running + high heap = main-thread starvation). Streamed to
+    // the live JSONL (correlates with the session) + console.
+    function _logInputDropout(sinceCbMs) {
+        let heapMb = null;
+        try {
+            if (typeof performance !== 'undefined' && performance.memory) {
+                heapMb = Math.round(performance.memory.usedJSHeapSize / 1048576);
+            }
+        } catch (_) {}
+        const rec = {
+            type: 'input_dropout',
+            schema: 'note_detect.live.input_dropout.v1',
+            ts: new Date().toISOString(),
+            plugin_version: _ND_VERSION,
+            since_last_cb_ms: sinceCbMs,
+            enabled,
+            audio_ctx_state: (audioCtx && audioCtx.state) || null,
+            sample_rate: (audioCtx && audioCtx.sampleRate) || null,
+            frame_size: frameSize,
+            processing_frame: processingFrame,
+            max_cb_gap_ms: _maxCbGapMs,
+            rec_armed: !!(_recArmed || _recArmedForTraining),
+            using_bridge: usingDesktopBridge,
+            arrangement: currentArrangement || null,
+            track_ready: (_healthTrack && _healthTrack.readyState) || null,
+            track_muted: _healthTrack ? !!_healthTrack.muted : null,
+            track_enabled: _healthTrack ? !!_healthTrack.enabled : null,
+            heap_mb: heapMb,
+        };
+        try { console.warn('[note_detect] input_dropout', JSON.stringify(rec)); } catch (_) {}
+        try { if (_liveSessionId) _streamLiveJudgment(rec); } catch (_) {}
+    }
+
     function stopAudio() {
         // Drop this instance's ML-gate claim while the bridge is still
         // resolvable (bridgeDesktop is cleared below) so the engine ML pipeline
@@ -4114,6 +4389,9 @@ function createNoteDetector(options = {}) {
         // false rather than _ndUpdateMlGate() — usingDesktopBridge is still true
         // here, so the predicate could otherwise miscompute a stale arm.
         _ndSyncMlGate(_ndGateToken, false, _ndBridgeAudio());
+        _inputLost = false;
+        _unbindStreamHealth();
+        _healthTrack = null;
         stopLevelMeter();
         stopBridgeLevelMeter();
         if (detectInterval) { clearInterval(detectInterval); detectInterval = null; }
@@ -4880,6 +5158,12 @@ function createNoteDetector(options = {}) {
             // hit is not gated on a moving target.
             pitchThresholdCents: Number.isFinite(extra.pitchThresholdCents)
                 ? extra.pitchThresholdCents : pitchHitThreshold,
+            // Same widened-window signal drives the clean *pitch* skip: an
+            // intentionally off-chart bend/slide/harmonic must not be graded
+            // looseReason:'pitch'. Clean timing still applies.
+            pitchWindowWidened: Number.isFinite(extra.pitchThresholdCents),
+            cleanTimingThresholdMs: cleanTimingThreshold * 1000,
+            cleanPitchThresholdCents: cleanPitchThreshold,
             hitStrings: extra.hitStrings,
             totalStrings: extra.totalStrings,
             score: extra.score,
@@ -5053,6 +5337,7 @@ function createNoteDetector(options = {}) {
         const isChord = !!judgment.chord;
         if (judgment.hit) {
             (isChord ? _diagChords : _diagSingles).hits++;
+            if (judgment.clean === false) _diagClean.loose++; else _diagClean.clean++;
         } else {
             (isChord ? _diagChords : _diagSingles).misses++;
             if (isChord) {
@@ -5110,6 +5395,8 @@ function createNoteDetector(options = {}) {
             f:   Number.isInteger(nn.f) ? nn.f : null,
             sus: Number.isFinite(nn.sus) ? +(+nn.sus).toFixed(3) : 0,
             hit:   !!judgment.hit,
+            clean: !!judgment.clean,
+            lr:  judgment.looseReason || undefined,   // 'timing' | 'pitch' | 'both' on a loose hit
             chord: !!judgment.chord,
             ts:  judgment.timingState || null,
             ps:  judgment.pitchState  || null,
@@ -5190,6 +5477,7 @@ function createNoteDetector(options = {}) {
         for (const k of Object.keys(_diagBreakdown)) _diagBreakdown[k] = 0;
         _diagSingles.hits = 0; _diagSingles.misses = 0;
         _diagChords.hits  = 0; _diagChords.misses  = 0;
+        _diagClean.clean = 0; _diagClean.loose = 0;
         for (const slot of _diagPerString) { slot.hits = 0; slot.misses = 0; }
         _diagTimingErrors.length = 0;
         _diagTimingErrorsHits.length = 0;
@@ -13834,6 +14122,9 @@ function createNoteDetector(options = {}) {
         // callers like splitscreen that unmount a panel without
         // meaning to end-of-song the session.
         disable({ silent: true });
+        // Persistent watchdog (bound at construction) — tear it down here.
+        if (scoringWatchdog) { clearInterval(scoringWatchdog); scoringWatchdog = null; }
+        try { _clearScoringStall(); } catch (_) {}
         // Free the engine input source we allocated for this instance (if any).
         // disable()→stopAudio() already cleared bridgeDesktop, so this re-resolves
         // window.feedBackDesktop. No-op for the default singleton / source 0.
@@ -13952,6 +14243,11 @@ function createNoteDetector(options = {}) {
                 singles: { hits: _diagSingles.hits, misses: _diagSingles.misses, accuracy: sAcc },
                 chords:  { hits: _diagChords.hits,  misses: _diagChords.misses,  accuracy: cAcc },
                 rescue: { calls: _rescueCalls, windows: _rescueWindows, hits: _rescueHits, skipped_silent: _rescueSkippedSilent },
+                // Clean vs loose hit split — low clean_rate next to high
+                // accuracy = sloppy-but-technically-hit.
+                clean_hits: _diagClean.clean,
+                loose_hits: _diagClean.loose,
+                clean_rate: hits > 0 ? +(_diagClean.clean / hits).toFixed(3) : null,
             },
             miss_breakdown: { ..._diagBreakdown },
             per_string: _diagPerString.map((slot, s) => ({
@@ -17039,6 +17335,12 @@ function createNoteDetector(options = {}) {
                 if (Number.isFinite(s.pitchHitThreshold))   pitchHitThreshold   = s.pitchHitThreshold;
                 if (Number.isFinite(s.timingTolerance))     timingTolerance     = s.timingTolerance;
                 if (Number.isFinite(s.timingHitThreshold))  timingHitThreshold  = s.timingHitThreshold;
+                // Floor here as the runtime path does (see ~L2378): a
+                // programmatic 0/negative clean threshold would otherwise be
+                // accepted, degenerating the clean band. Upper clamp (≤ hit
+                // threshold) is re-enforced at the end of this setter.
+                if (Number.isFinite(s.cleanTimingThreshold)) cleanTimingThreshold = Math.max(0.01, s.cleanTimingThreshold);
+                if (Number.isFinite(s.cleanPitchThreshold))  cleanPitchThreshold  = Math.max(1, s.cleanPitchThreshold);
                 if (Number.isFinite(s.chordTimingHitThreshold)) {
                     // Clamp here too — _harness is a Node-only entrypoint
                     // (harness.js + regression.js drive scoring through it)
@@ -17062,7 +17364,18 @@ function createNoteDetector(options = {}) {
                 if (timingHitThreshold > timingTolerance) timingHitThreshold = timingTolerance;
                 if (chordTimingHitThreshold < timingHitThreshold) chordTimingHitThreshold = timingHitThreshold;
                 if (chordTimingHitThreshold > timingTolerance)    chordTimingHitThreshold = timingTolerance;
+                // Clean thresholds live strictly inside the hit window.
+                if (cleanTimingThreshold > timingHitThreshold) cleanTimingThreshold = timingHitThreshold;
+                if (cleanPitchThreshold > pitchHitThreshold)   cleanPitchThreshold = pitchHitThreshold;
             },
+            // Read back the (clamped) tolerance/threshold state so a
+            // headless caller / test can assert the clamps held.
+            getSettings: () => ({
+                pitchTolerance, pitchHitThreshold,
+                timingTolerance, timingHitThreshold,
+                chordTimingHitThreshold,
+                cleanTimingThreshold, cleanPitchThreshold,
+            }),
         },
     };
 
@@ -17139,6 +17452,10 @@ function createNoteDetector(options = {}) {
         };
         setTimeout(() => autoEnableAttempt(1), 0);
     }
+
+    // Bind the input-dropout watchdog here (not in startAudio) so it also
+    // catches a detector that never came up. Default singleton only.
+    try { _bindScoringWatchdog(); } catch (_) {}
 
     _ndInstances.add(api);
     return api;
