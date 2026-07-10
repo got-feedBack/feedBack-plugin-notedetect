@@ -311,6 +311,7 @@ function loadDetectionCore({ sandboxBeforeRun } = {}) {
         },
         calibrateOffsetMs: sandbox._ndCalibrateOffsetMs,
         // Game-scoring pure helpers (points / multiplier / grade layer).
+        scoringHealthy: sandbox._ndScoringHealthy,
         multiplierForStreak: sandbox._ndMultiplierForStreak,
         isStreakMilestone: sandbox._ndIsStreakMilestone,
         gradeFor: sandbox._ndGradeFor,

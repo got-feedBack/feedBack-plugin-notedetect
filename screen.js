@@ -2164,6 +2164,17 @@ function _ndEncodeWavPcm16(chunks, sampleRate) {
     return buf;
 }
 
+// Pure health predicate for the scoring watchdog. Extracted so the
+// enabled/bridge/external/mic-callback decision is unit-testable without the
+// DOM + play-timing the full tick needs. Healthy when detection is on AND one
+// of the scoring inputs is live: the desktop bridge, an external MIDI provider
+// (keys/piano — opens no audio graph, so cbFresh is permanently false there and
+// _extActive must count as healthy or the watchdog spuriously banners + reopens
+// the mic against MIDI scoring), or a fresh mic callback.
+function _ndScoringHealthy(enabled, usingBridge, extActive, cbFresh) {
+    return !!(enabled && (usingBridge || extActive || cbFresh));
+}
+
 function createNoteDetector(options = {}) {
     const opts = options || {};
     // Highway is resolved lazily. A caller can pass `highway` in
@@ -2497,6 +2508,23 @@ function createNoteDetector(options = {}) {
     let inputLevel = 0;
     let inputPeak = 0;
     let peakDecay = 0;
+
+    // Input-dropout watchdog (ported from slopsmith note_detect 1.39.1). The
+    // "played a whole song into the void" failure: the interface drops the input
+    // (USB glitch, driver, audio focus) or the detector never came up, and
+    // nothing scores — invisible until the end-of-song summary. We stamp every
+    // audio callback and, while detection is wanted and the song is playing,
+    // alert + auto-recover within ~2s if the callbacks stop. Browser-only (the
+    // desktop bridge owns its own input health).
+    let _lastAudioCbT = 0;            // Date.now() of the last onaudioprocess
+    let _maxCbGapMs = 0;              // worst inter-callback gap this play (starvation gauge)
+    let _scoringStalled = false;      // banner state (not scoring while playing)
+    let _wdPlayStartT = 0;            // when the current playing+wantsDetect stretch began
+    let _inputLost = false;           // track ended/muted (device dropped)
+    let _lastInputRecover = 0;        // throttle re-acquire so a glitch storm can't thrash
+    let scoringWatchdog = null;       // persistent setInterval handle (cleared in destroy)
+    let _healthTrack = null;          // the live input MediaStreamTrack (for dropout telemetry)
+    let _healthHandlers = null;       // { track, ended, mute, unmute } — stored so we can detach before rebinding
 
     // Calibration Wizard v2 — system setup only (safe settings; no scoring thresholds)
     let _calWizardEl = null;
@@ -3934,6 +3962,8 @@ function createNoteDetector(options = {}) {
 
             sourceNode = audioCtx.createMediaStreamSource(stream);
             const streamChannels = sourceNode.channelCount;
+            // Watch this stream's track for a mid-session interface drop.
+            try { _bindStreamHealth(stream); } catch (_) {}
 
             gainNode = audioCtx.createGain();
             gainNode.gain.value = inputGain;
@@ -3960,6 +3990,16 @@ function createNoteDetector(options = {}) {
             pendingBuffer = null;
 
             processor.onaudioprocess = (e) => {
+                // Heartbeat: stamp every callback (even when disabled) so the
+                // scoring watchdog can tell a stalled audio graph from a quiet
+                // instrument. Also track the worst inter-callback gap — the
+                // direct measure of main-thread starvation. Cheap; runs ~20×/s.
+                const _cbNow = (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0;
+                if (_lastAudioCbT) {
+                    const gap = _cbNow - _lastAudioCbT;
+                    if (gap > _maxCbGapMs) _maxCbGapMs = gap;
+                }
+                _lastAudioCbT = _cbNow;
                 if (!enabled) return;
                 const input = e.inputBuffer.getChannelData(0);
                 const prev = accumBuffer;
@@ -4022,6 +4062,193 @@ function createNoteDetector(options = {}) {
         }
     }
 
+    // Watch the live input MediaStreamTrack for the interface dropping out
+    // mid-session (USB/driver glitch, audio focus loss). `ended`/`mute` mark the
+    // input lost + surface it (not left guessing why nothing scored) and, after
+    // a short grace for the device to self-heal, re-acquire ONCE — throttled so
+    // a flapping device can't thrash getUserMedia. `unmute` clears it.
+    // Detach the ended/mute/unmute listeners bound by a previous
+    // _bindStreamHealth. On the shared externalStream path the same track
+    // survives restart cycles, so without this each startAudio() would stack
+    // another set of closures on it and fire markLost() N times per drop.
+    function _unbindStreamHealth() {
+        if (!_healthHandlers) return;
+        const { track, ended, mute, unmute } = _healthHandlers;
+        try {
+            track.removeEventListener('ended', ended);
+            track.removeEventListener('mute', mute);
+            track.removeEventListener('unmute', unmute);
+        } catch (_) { /* track event API unavailable */ }
+        _healthHandlers = null;
+    }
+
+    function _bindStreamHealth(s) {
+        if (!s || typeof s.getAudioTracks !== 'function') return;
+        const track = s.getAudioTracks()[0];
+        if (!track) return;
+        // Drop any prior binding first so restart cycles don't accumulate
+        // duplicate listeners on a reused track.
+        _unbindStreamHealth();
+        _healthTrack = track;   // captured for the dropout-telemetry record
+        const markLost = (why) => {
+            if (_inputLost || !enabled) return;
+            _inputLost = true;
+            console.warn(`[note_detect] input ${why} — the audio interface dropped the input stream`);
+            try { updateButton(); } catch (_) {}
+            setTimeout(() => {
+                if (!enabled || !_inputLost) return;
+                const now = (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0;
+                if (now - _lastInputRecover < 4000) return;
+                _lastInputRecover = now;
+                console.warn('[note_detect] re-acquiring input after drop');
+                try { restartAudio(); } catch (_) {}
+            }, 1500);
+        };
+        const onEnded = () => markLost('ended');
+        const onMute = () => markLost('muted');
+        const onUnmute = () => {
+            if (!_inputLost) return;
+            _inputLost = false;
+            try { updateButton(); } catch (_) {}
+        };
+        try {
+            track.addEventListener('ended', onEnded);
+            track.addEventListener('mute', onMute);
+            track.addEventListener('unmute', onUnmute);
+            _healthHandlers = { track, ended: onEnded, mute: onMute, unmute: onUnmute };
+        } catch (_) { /* track event API unavailable */ }
+    }
+
+    // Scoring watchdog. Bound ONCE at construction (default singleton), NOT
+    // inside startAudio: the worst failure (a getUserMedia race that makes
+    // startAudio return false and silently turns Detect off) happens precisely
+    // when startAudio never succeeds, so a watchdog created there would never
+    // run for it. Instead this keys on intent: the user wants detection AND the
+    // song is playing, but nothing is scoring — covering BOTH a never-started
+    // detector and a mid-play input drop, recovering each the right way.
+    function _bindScoringWatchdog() {
+        if (!isDefault || scoringWatchdog) return;
+        scoringWatchdog = setInterval(_scoringWatchdogTick, 1000);
+        // Don't pin the Node event loop open in tests (no-op in the browser).
+        if (scoringWatchdog && typeof scoringWatchdog.unref === 'function') scoringWatchdog.unref();
+    }
+
+    function _scoringWatchdogTick() {
+        const now = (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0;
+        // In split mode the default singleton is suppressed — a panel owns
+        // capture. Without this guard the watchdog would call enable() on the
+        // suppressed default and bring the main HUD/mic back on top of P1.
+        // Mirrors the check in _reArmOnSongLoaded() and construct-time auto-enable.
+        if (typeof window !== 'undefined' && window.__ndSuppressDefault) {
+            _wdPlayStartT = 0; _clearScoringStall(); return;
+        }
+        const playing = !!(window.slopsmith && window.slopsmith.isPlaying);
+        // Only meaningful while playing AND the user wants detection on.
+        if (!playing || !detectPreference) { _wdPlayStartT = 0; _clearScoringStall(); return; }
+        if (!_wdPlayStartT) { _wdPlayStartT = now; _maxCbGapMs = 0; }  // fresh play: reset starvation gauge
+        // Grace: let enable()/startAudio come up after Play before judging.
+        if (now - _wdPlayStartT < 2500) return;
+        // Healthy = detection enabled AND the audio callback fired recently. The
+        // bridge path doesn't use onaudioprocess, so treat enabled-on-bridge as
+        // healthy — its own input handling owns that case.
+        const cbFresh = (now - _lastAudioCbT) < 1800;
+        if (_ndScoringHealthy(enabled, usingDesktopBridge, _extActive, cbFresh)) { _clearScoringStall(); return; }
+        // Keys/piano arrangements are scored by an external MIDI provider, never
+        // the mic. A keys song idle-waiting for its provider to bind is legitimately
+        // enabled=false (enableImpl bails without opening the mic) — not a dropped
+        // input. The _extWatchOpen watcher owns (re)binding, so never banner or
+        // re-open the mic here regardless of enabled/_extActive state.
+        if (_ndIsExternalScoredArrangement()) { _clearScoringStall(); return; }
+        // Wants detection, song playing, but not scoring. Surface loudly NOW
+        // (seconds in, not at song end) and auto-recover the right way:
+        // re-enable if Detect fell off, or re-acquire the input if it's
+        // enabled-but-dead. Throttled.
+        if (!_scoringStalled) {
+            _scoringStalled = true;
+            _inputLost = true;
+            console.warn(`[note_detect] scoring watchdog: playing + detect wanted, but not scoring (enabled=${enabled}, cbAgeMs=${now - _lastAudioCbT}) — recovering`);
+            try { updateButton(); } catch (_) {}
+            try { _showScoringStallBanner(); } catch (_) {}
+            try { _logInputDropout(now - _lastAudioCbT); } catch (_) {}
+        }
+        if (now - _lastInputRecover >= 4000) {
+            _lastInputRecover = now;
+            if (!enabled) {
+                console.warn('[note_detect] scoring watchdog: re-enabling detection');
+                try { Promise.resolve(enable()).catch(() => {}); } catch (_) {}
+            } else {
+                console.warn('[note_detect] scoring watchdog: re-acquiring input');
+                try { restartAudio(); } catch (_) {}
+            }
+        }
+    }
+
+    function _clearScoringStall() {
+        if (!_scoringStalled) return;
+        _scoringStalled = false;
+        _inputLost = false;
+        try { updateButton(); } catch (_) {}
+        try { _hideScoringStallBanner(); } catch (_) {}
+    }
+
+    // A loud banner the moment scoring goes dead mid-play — caught in seconds,
+    // not at the end-of-song summary. Self-heals (auto-reconnect above); a
+    // manual button is offered in case the device needs a kick.
+    function _showScoringStallBanner() {
+        let banner = instanceRoot.querySelector('.nd-scoring-stall');
+        if (!banner) {
+            banner = document.createElement('div');
+            banner.className = 'nd-scoring-stall fixed top-3 left-1/2 -translate-x-1/2 z-[300] flex items-center gap-3 bg-red-900/95 border-2 border-red-500 rounded-xl px-4 py-2.5 shadow-2xl text-sm';
+            banner.innerHTML = '<span class="text-red-100 font-semibold">⚠ Detect is ON but not hearing your instrument — input dropped. Reconnecting…</span>'
+                + '<button class="nd-scoring-stall-retry px-2 py-1 bg-red-700 hover:bg-red-600 rounded text-xs text-white">Reconnect now</button>';
+            instanceRoot.appendChild(banner);
+            const retry = banner.querySelector('.nd-scoring-stall-retry');
+            if (retry) retry.onclick = () => { try { restartAudio(); } catch (_) {} };
+        }
+        banner.style.display = '';
+    }
+
+    function _hideScoringStallBanner() {
+        const banner = instanceRoot.querySelector('.nd-scoring-stall');
+        if (banner) banner.remove();
+    }
+
+    // Dropout telemetry — captures the discriminating state at the moment
+    // scoring went dead so a single occurrence settles rig-vs-program without a
+    // replay (audio_ctx_state parked = OS/rig; track ended/muted = device
+    // dropped; live + running + high heap = main-thread starvation). Streamed to
+    // the live JSONL (correlates with the session) + console.
+    function _logInputDropout(sinceCbMs) {
+        let heapMb = null;
+        try {
+            if (typeof performance !== 'undefined' && performance.memory) {
+                heapMb = Math.round(performance.memory.usedJSHeapSize / 1048576);
+            }
+        } catch (_) {}
+        const rec = {
+            type: 'input_dropout',
+            schema: 'note_detect.live.input_dropout.v1',
+            ts: new Date().toISOString(),
+            plugin_version: _ND_VERSION,
+            since_last_cb_ms: sinceCbMs,
+            enabled,
+            audio_ctx_state: (audioCtx && audioCtx.state) || null,
+            sample_rate: (audioCtx && audioCtx.sampleRate) || null,
+            frame_size: frameSize,
+            processing_frame: processingFrame,
+            max_cb_gap_ms: _maxCbGapMs,
+            rec_armed: !!(_recArmed || _recArmedForTraining),
+            using_bridge: usingDesktopBridge,
+            arrangement: currentArrangement || null,
+            track_ready: (_healthTrack && _healthTrack.readyState) || null,
+            track_muted: _healthTrack ? !!_healthTrack.muted : null,
+            track_enabled: _healthTrack ? !!_healthTrack.enabled : null,
+            heap_mb: heapMb,
+        };
+        try { console.warn('[note_detect] input_dropout', JSON.stringify(rec)); } catch (_) {}
+        try { if (_liveSessionId) _streamLiveJudgment(rec); } catch (_) {}
+    }
+
     function stopAudio() {
         // Drop this instance's ML-gate claim while the bridge is still
         // resolvable (bridgeDesktop is cleared below) so the engine ML pipeline
@@ -4029,6 +4256,9 @@ function createNoteDetector(options = {}) {
         // false rather than _ndUpdateMlGate() — usingDesktopBridge is still true
         // here, so the predicate could otherwise miscompute a stale arm.
         _ndSyncMlGate(_ndGateToken, false, _ndBridgeAudio());
+        _inputLost = false;
+        _unbindStreamHealth();
+        _healthTrack = null;
         stopLevelMeter();
         stopBridgeLevelMeter();
         if (detectInterval) { clearInterval(detectInterval); detectInterval = null; }
@@ -13559,6 +13789,9 @@ function createNoteDetector(options = {}) {
         // callers like splitscreen that unmount a panel without
         // meaning to end-of-song the session.
         disable({ silent: true });
+        // Persistent watchdog (bound at construction) — tear it down here.
+        if (scoringWatchdog) { clearInterval(scoringWatchdog); scoringWatchdog = null; }
+        try { _clearScoringStall(); } catch (_) {}
         // Free the engine input source we allocated for this instance (if any).
         // disable()→stopAudio() already cleared bridgeDesktop, so this re-resolves
         // window.feedBackDesktop. No-op for the default singleton / source 0.
@@ -16885,6 +17118,10 @@ function createNoteDetector(options = {}) {
         };
         setTimeout(() => autoEnableAttempt(1), 0);
     }
+
+    // Bind the input-dropout watchdog here (not in startAudio) so it also
+    // catches a detector that never came up. Default singleton only.
+    try { _bindScoringWatchdog(); } catch (_) {}
 
     _ndInstances.add(api);
     return api;
