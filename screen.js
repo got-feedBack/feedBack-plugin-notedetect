@@ -2952,7 +2952,7 @@ function createNoteDetector(options = {}) {
     // plain manual A-B loop still scores via the foundation but never touches
     // this state.
     let drillConductorActive = false;
-    let drillConductorLadder = null;        // [0.7, 0.85, 1.0] — slow → full
+    let drillConductorLadder = null;        // default _ND_DRILL_DEFAULT_LADDER [0.8, 0.9, 1.0] — slow → full; re-read at construction/resetScoring
     let drillConductorRung = 0;             // index into the ladder
     let drillConductorGoal = _ND_DRILL_DEFAULT_GOAL;  // 0..1 iteration accuracy to advance
     let drillConductorBest = 0;             // best iteration accuracy (0..1) at the current rung
@@ -2967,6 +2967,7 @@ function createNoteDetector(options = {}) {
     // practices playing into and out of the hard passage, not just isolating it.
     let drillConductorExpandsLeft = 0;      // remaining auto-expansions (0 = off)
     let drillConductorOnWrapFn = null;      // bound loop:restart listener (own, not via the foundation)
+    let _drillHudRemoveTimer = null;        // pending graduation-HUD fade-out timeout (cancelled if a new drill shows its HUD first)
     let _ndDrillLastChartT = 0;             // chart time last tick — a backward jump = a loop wrap
     let _ndDrillLastScoredPerf = 0;         // perf ms of the last scored wrap (dedupe loop:restart vs chart-tick)
     // Beat-locked drill metronome (playhead-driven) — see _drillInitBeats.
@@ -5899,6 +5900,10 @@ function createNoteDetector(options = {}) {
         for (const key of _ndKeysToReopenOnSeek(_ndLastMissScanT, t, tolerance, noteResults.keys())) {
             noteResults.delete(key);
             _susActiveUntil.delete(key);
+            // Mirror _recomputeScoreToPosition: drop the chord voicing-rescue
+            // cache too, so a reopened chord can't be rescued on the replay by a
+            // stale voicingHit:true from the first pass through this section.
+            _chordLastResult.delete(key);
         }
         _ndLastMissScanT = t;
         const missDeadline = t - tolerance * 2;
@@ -12115,6 +12120,15 @@ function createNoteDetector(options = {}) {
         // Bind our OWN loop:restart listener so each pass is scored even if
         // the foundation's drillEnabled sync doesn't flip for a plugin loop.
         if (window.slopsmith && typeof window.slopsmith.on === 'function') {
+            // Re-entrant start (e.g. the HUD loop-nudge re-arms an active drill
+            // via _drillAdjustLoop → startDrill, without going through endDrill):
+            // drop the prior loop:restart registration first so exactly one stays
+            // bound. On a bus that doesn't dedupe (event, fn) pairs, skipping this
+            // stacks handlers and each wrap double-scores the (already-cleared)
+            // window → bogus fail-streak/slowdown.
+            if (drillConductorOnWrapFn && typeof window.slopsmith.off === 'function') {
+                try { window.slopsmith.off('loop:restart', drillConductorOnWrapFn); } catch (_) {}
+            }
             drillConductorOnWrapFn = _drillConductorOnWrap;
             try { window.slopsmith.on('loop:restart', drillConductorOnWrapFn); } catch (_) {}
         }
@@ -12304,6 +12318,11 @@ function createNoteDetector(options = {}) {
             if (Number.isFinite(t) && t >= a && t <= b) {
                 noteResults.delete(key);
                 _susActiveUntil.delete(key);
+                // Mirror _recomputeScoreToPosition: also drop the chord
+                // voicing-rescue cache so a chord straddling the loop boundary
+                // can't keep a stale voicingHit:true and rescue an unplayed
+                // chord on a silent pass (inflating that pass's score).
+                _chordLastResult.delete(key);
             }
         }
     }
@@ -12557,6 +12576,10 @@ function createNoteDetector(options = {}) {
     // instance container owns the player) showing speed, goal, the last
     // iteration's score, and best-so-far at the current rung.
     function _drillConductorShowHud() {
+        // A new drill's HUD supersedes any pending graduation fade-out — cancel
+        // it so the stale timer can't remove THIS (reused-id) HUD out from under
+        // the next drill.
+        if (_drillHudRemoveTimer) { clearTimeout(_drillHudRemoveTimer); _drillHudRemoveTimer = null; }
         let hud = document.getElementById('nd-drill-hud');
         if (!hud) {
             hud = document.createElement('div');
@@ -12665,9 +12688,17 @@ function createNoteDetector(options = {}) {
         const hud = document.getElementById('nd-drill-hud');
         if (!hud) return;
         if (graduated) {
-            // Leave the graduation message up briefly, then fade.
+            // Leave the graduation message up briefly, then fade. Capture THIS
+            // node and store the timer id: on graduation the finder chains a new
+            // startDrill within 3s that reuses the #nd-drill-hud id, so a blind
+            // getElementById().remove() here would yank the NEXT drill's HUD
+            // (incl. its ✕ End button). _drillConductorShowHud cancels this timer
+            // when the next HUD appears; the isConnected guard is belt-and-braces.
             _drillConductorUpdateHud({ graduated: true });
-            setTimeout(() => { const h = document.getElementById('nd-drill-hud'); if (h) h.remove(); }, 3000);
+            _drillHudRemoveTimer = setTimeout(() => {
+                _drillHudRemoveTimer = null;
+                if (hud.isConnected) hud.remove();
+            }, 3000);
         } else {
             hud.remove();
         }
