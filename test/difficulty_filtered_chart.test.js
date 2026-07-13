@@ -264,7 +264,11 @@ test('no scoring path reads the unfiltered chart directly', () => {
         const code = line.replace(/\/\/.*$/, '');           // strip trailing comments
         if (/^\s*\/\//.test(line)) return;                   // skip comment-only lines
         if (!/\b_?hw\.get(Notes|Chords)\s*\(\s*\)/.test(code)) return;
-        if (ALLOWED.some((a) => line.includes(a))) return;
+        // Compare on collapsed whitespace: the allowlist entries carry the source's
+        // current double-spacing, and a formatter run that collapsed it would
+        // otherwise turn every allowed read into a false offender and redden CI.
+        const flat = (x) => x.replace(/\s+/g, ' ').trim();
+        if (ALLOWED.some((a) => flat(line).includes(flat(a)))) return;
         offenders.push(`${i + 1}: ${line.trim()}`);
     });
     assert.deepEqual(offenders, [],
