@@ -15305,14 +15305,6 @@ function createNoteDetector(options = {}) {
                 suppressed_redelivery: _ndDrainStats.suppressedRedelivery,
                 max_batch: _ndDrainStats.maxBatch,
             },
-            // Engine-drain health. All zeros on the browser path (the drain
-            // never runs). See _ndDrainStats for how to read a non-zero.
-            engine_drain: {
-                active: _ndUsingEngineVerifier,
-                drop_unknown_id: _ndDrainStats.dropUnknownId,
-                suppressed_redelivery: _ndDrainStats.suppressedRedelivery,
-                max_batch: _ndDrainStats.maxBatch,
-            },
             miss_breakdown: { ..._diagBreakdown },
             per_string: _diagPerString.map((slot, s) => ({
                 s,

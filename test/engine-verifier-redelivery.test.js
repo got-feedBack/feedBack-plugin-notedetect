@@ -130,10 +130,13 @@ test('engine-verifier: re-delivered verdicts do not double-count after the noteR
     env.setHwTime(120);
     for (const cb of env.intervalCallbacks) {
         if (cb === detectTick) continue;
-        try {
-            // eslint-disable-next-line no-await-in-loop
-            await cb();
-        } catch (_) { /* unrelated interval; not under test */ }
+        // Deliberately NOT wrapped in try/catch. If the gc interval throws, the
+        // prune never happens, noteResults still holds every key, and the stale
+        // `noteResults.has()` guard would suppress the re-delivery on its own —
+        // so this test would pass while proving nothing. A throwing interval must
+        // fail the test, not be swallowed.
+        // eslint-disable-next-line no-await-in-loop
+        await cb();
         // eslint-disable-next-line no-await-in-loop
         await flushPendingAsync();
     }
