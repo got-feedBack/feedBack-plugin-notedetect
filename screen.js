@@ -3592,6 +3592,23 @@ function createNoteDetector(options = {}) {
     // the live signature diverges from this, covering late chart load and
     // mid-session arrangement switches.
     let _ndVerifierChartSig = '';
+    // Engine-drain health counters (surfaced in the diagnostic export). Every
+    // way a drained verdict can fail to reach the HUD is silent by
+    // construction — a `continue` in the drain loop — so a scoring counter that
+    // freezes or leaps has no on-disk trace. These give one.
+    //   dropUnknownId       : verdict whose id isn't in _ndVerifierChartById.
+    //                         Non-zero => the engine's chart and ours disagree,
+    //                         and those notes are scored by neither.
+    //   suppressedRedelivery: verdict for a note we already counted, arriving
+    //                         again. Non-zero is EXPECTED after a mid-song
+    //                         setChart (which un-finalizes the whole chart
+    //                         engine-side); it means the ledger guard below did
+    //                         its job. Before that guard existed these
+    //                         double-counted.
+    //   maxBatch            : largest single drain. drainVerdicts() is an
+    //                         uncapped swap, so a big batch means the engine ran
+    //                         a long stretch we never picked up.
+    const _ndDrainStats = { dropUnknownId: 0, suppressedRedelivery: 0, maxBatch: 0 };
     // Last playhead pushed to the engine, in corrected song time. Lets
     // _ndDrainEngineVerdicts spot a backward jump (drill A-B loop wrap or a
     // manual seek-back) and clear the dedup entries the engine is re-opening.
@@ -5672,6 +5689,33 @@ function createNoteDetector(options = {}) {
         _diagTimingErrorsHits.length = 0;
         _diagPitchErrors.length  = 0;
         _diagEvents.length       = 0;
+        _ndDrainStats.dropUnknownId = 0;
+        _ndDrainStats.suppressedRedelivery = 0;
+        _ndDrainStats.maxBatch = 0;
+    }
+
+    // Has this key already been COUNTED into hits/misses?
+    //
+    // noteResults cannot answer this on its own: the gc interval prunes it for
+    // memory (entries more than 5 s behind the playhead, once it passes 500),
+    // so on the engine path a pruned entry silently disarms the drain's
+    // double-count guard. The engine re-delivers old notes routinely — any
+    // setChart un-finalizes the ENTIRE chart (NoteVerifier::setChart), so every
+    // note behind the playhead re-finalizes and comes back in one uncapped
+    // drain — and a mid-song setChart is not rare: the detect loop re-pushes
+    // whenever _ndChartSignature() changes, which includes the timing/pitch
+    // tolerance sliders. Result: nudge a slider mid-song and the whole chart
+    // behind you scores a second time.
+    //
+    // _scoreLedger carries one entry per counted judgment under the SAME key and
+    // is never GC'd, so it is the authority. Check both: the ledger skips a
+    // judgment with no derivable note time, which noteResults still holds.
+    //
+    // The browser path's own noteResults.has() guards don't need this —
+    // checkMisses only scans back ~2.2 s (scanStartT), well inside the GC's 5 s
+    // horizon, so it never revisits a pruned note.
+    function _ndAlreadyCounted(key) {
+        return noteResults.has(key) || _scoreLedger.has(key);
     }
 
     function recordJudgment(key, judgment, { count = true, emit = true } = {}) {
@@ -13699,13 +13743,20 @@ function createNoteDetector(options = {}) {
         // A backward jump (drill A-B loop wrap or a manual seek-back): the
         // engine re-opens notes at/after the new position, so drop our dedup
         // entries for those same notes. Otherwise the re-scored verdicts are
-        // skipped by the `noteResults.has(key)` guard below and a drilled
-        // passage scores only on its first iteration. 0.25 s matches the
-        // engine's own backward-jump threshold.
+        // skipped by the _ndAlreadyCounted() guard below and a drilled passage
+        // scores only on its first iteration. 0.25 s matches the engine's own
+        // backward-jump threshold.
+        //
+        // _scoreLedger is dropped in lockstep with noteResults: it now backs
+        // that guard, so leaving a re-opened note in the ledger would keep it
+        // suppressed forever. recordJudgment re-ledgers each note as it
+        // re-scores, and the entry it writes is the same one it would have
+        // overwritten in place, so the rebuilt ledger is unchanged.
         if (playheadAudio < _ndLastPushedPlayhead - 0.25) {
             for (const [id, cn] of _ndVerifierChartById) {
                 if (cn && Number.isFinite(cn.t) && cn.t >= playheadAudio) {
                     noteResults.delete(id);
+                    _scoreLedger.delete(id);
                     _susActiveUntil.delete(id);
                 }
             }
@@ -13714,6 +13765,7 @@ function createNoteDetector(options = {}) {
             for (const [ckey, grp] of _ndVerifierChords) {
                 if (grp && Number.isFinite(grp.t) && grp.t >= playheadAudio) {
                     noteResults.delete(ckey);
+                    _scoreLedger.delete(ckey);
                     _ndPendingChords.delete(ckey);
                 }
             }
@@ -13728,11 +13780,12 @@ function createNoteDetector(options = {}) {
             return;
         }
         if (!Array.isArray(verdicts) || verdicts.length === 0) return;
+        if (verdicts.length > _ndDrainStats.maxBatch) _ndDrainStats.maxBatch = verdicts.length;
 
         for (const v of verdicts) {
             if (!v || typeof v.id !== 'string') continue;
             const cn = _ndVerifierChartById.get(v.id);
-            if (!cn) continue;
+            if (!cn) { _ndDrainStats.dropUnknownId++; continue; }
 
             // Silence gate — see _ndLevelSamples. If the input was below
             // the silence threshold across the entire ±200 ms window
@@ -13798,7 +13851,8 @@ function createNoteDetector(options = {}) {
             // with N-of-M leniency (see _ndFinalizeChordVerdict).
             const chordKey = _ndVerifierChordKeyOf.get(v.id);
             if (chordKey) {
-                if (noteResults.has(chordKey)) continue;  // chord already judged
+                // Chord already judged — a re-delivery, not a new strum.
+                if (_ndAlreadyCounted(chordKey)) { _ndDrainStats.suppressedRedelivery++; continue; }
                 let pc = _ndPendingChords.get(chordKey);
                 if (!pc) { pc = new Map(); _ndPendingChords.set(chordKey, pc); }
                 pc.set(v.id, v);
@@ -13812,7 +13866,7 @@ function createNoteDetector(options = {}) {
 
             // Lone single note.
             const key = v.id;
-            if (noteResults.has(key)) continue;
+            if (_ndAlreadyCounted(key)) { _ndDrainStats.suppressedRedelivery++; continue; }
 
             const expectedMidi = _ndMidiFromStringFret(
                 cn.s, cn.f, currentArrangement, currentStringCount, tuningOffsets, capo
@@ -13929,7 +13983,7 @@ function createNoteDetector(options = {}) {
     // every string would reject chords that clearly rang. Emits one chord
     // judgment (chord:true), mirroring the legacy chord path.
     function _ndFinalizeChordVerdict(chordKey, grp, verdictMap) {
-        if (noteResults.has(chordKey)) return;
+        if (_ndAlreadyCounted(chordKey)) return;
         let hitStrings = 0;
         let detectedTime = null;   // onset-derived time from a struck string
         let bestCents = null;
@@ -15242,6 +15296,22 @@ function createNoteDetector(options = {}) {
                 clean_hits: _diagClean.clean,
                 loose_hits: _diagClean.loose,
                 clean_rate: hits > 0 ? +(_diagClean.clean / hits).toFixed(3) : null,
+            },
+            // Engine-drain health. All zeros on the browser path (the drain
+            // never runs). See _ndDrainStats for how to read a non-zero.
+            engine_drain: {
+                active: _ndUsingEngineVerifier,
+                drop_unknown_id: _ndDrainStats.dropUnknownId,
+                suppressed_redelivery: _ndDrainStats.suppressedRedelivery,
+                max_batch: _ndDrainStats.maxBatch,
+            },
+            // Engine-drain health. All zeros on the browser path (the drain
+            // never runs). See _ndDrainStats for how to read a non-zero.
+            engine_drain: {
+                active: _ndUsingEngineVerifier,
+                drop_unknown_id: _ndDrainStats.dropUnknownId,
+                suppressed_redelivery: _ndDrainStats.suppressedRedelivery,
+                max_batch: _ndDrainStats.maxBatch,
             },
             miss_breakdown: { ..._diagBreakdown },
             per_string: _diagPerString.map((slot, s) => ({
