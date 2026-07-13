@@ -50,6 +50,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { parseArgs } = require('node:util');
 const { loadDetectionCore } = require('../test/_loader');
+const { parseJsonChart } = require('./jsonc');
 
 // ── WAV (RIFF) reader ──────────────────────────────────────────────
 //
@@ -337,7 +338,7 @@ if (args['clean-pitch-threshold'] !== undefined) {
 // ── Load chart ──────────────────────────────────────────────────────
 let chart;
 try {
-    chart = JSON.parse(fs.readFileSync(args.chart, 'utf8'));
+    chart = parseJsonChart(args.chart);
 } catch (e) {
     process.stderr.write(`failed to read chart ${args.chart}: ${e.message}\n`);
     process.exit(2);
