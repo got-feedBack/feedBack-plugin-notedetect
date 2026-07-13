@@ -316,7 +316,7 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // exact build that produced it. The script tag has no `import`/`fetch`
 // hook to read package.json at load time, so this is the single
 // hand-maintained constant the diagnostic path keys off of.
-const _ND_VERSION = '1.30.0';
+const _ND_VERSION = '1.31.0';
 
 // Bleed-rescue tuning for the low-bass blind spot. A bass DI's fundamental is
 // weaker than its 2nd harmonic and an open string / neighbour often rings the
@@ -2473,6 +2473,27 @@ function createNoteDetector(options = {}) {
     // calibration silently. Fall back to the chord constituents rather than skip:
     // flattened onto the chord's onset they're the same {s, f, t} shape the sweep
     // already takes.
+    // The chart + difficulty the training bundle pins at song:ended. This is the
+    // LABEL for the take's WAV, and the WAV only contains the notes the highway
+    // actually drew — so it is FILTERED. Under a reduced mastery level the 100%
+    // chart asserts notes that are not in the audio, which teaches the detector to
+    // expect notes nobody played. The full chart stays recoverable from
+    // song.filename + arrangement; the drawn subset would NOT be recoverable from
+    // the full chart, because the phrase filter lives in the highway — so this is
+    // the lossless direction.
+    //
+    // mastery / hasPhraseData ride along so a consumer can tell a reduced-difficulty
+    // take from a full one. Without them a take at 60% is indistinguishable from a
+    // 100% take of a sparser song, and the dataset can't be segmented after the fact.
+    function _ndTrainingChartSnapshot() {
+        return {
+            notes:  _ndChartNotes(),
+            chords: _ndChartChords(),
+            mastery: (hw && hw.getMastery) ? hw.getMastery() : null,
+            hasPhraseData: !!(hw && hw.hasPhraseData && hw.hasPhraseData()),
+        };
+    }
+
     function _ndCalibrationNotes() {
         const singles = _ndChartNotes().filter((n) => n && Number.isFinite(n.t));
         if (singles.length) return singles;
@@ -13641,20 +13662,28 @@ function createNoteDetector(options = {}) {
         // 50 ms tick is nothing beside the FFT work already on this path.
         let fnv = 0x811c9dc5;
         const mix = (v) => { fnv ^= (v | 0); fnv = Math.imul(fnv, 0x01000193); };
-        for (const nn of notes) {
-            if (!nn) continue;
+        // Hash EVERY field _ndPushChartToBridge actually sends, not just position:
+        // a difficulty level can swap in the same note at the same string/fret with
+        // a different sustain or technique (a note that becomes a sustain, or gains
+        // a bend, higher up the ladder). Hashing only t/s/f would leave the engine
+        // verifying stale sus/technique data against the new chart.
+        const mixNote = (nn) => {
             mix(Math.round((Number.isFinite(nn.t) ? nn.t : 0) * 1000));
             mix(((nn.s | 0) * 100) + (nn.f | 0));
-        }
+            mix(Math.round((Number.isFinite(nn.sus) ? nn.sus : 0) * 1000));
+            mix((nn.ho ? 1 : 0) | (nn.po ? 2 : 0) | (nn.b ? 4 : 0)
+                | (nn.sl ? 8 : 0) | (nn.hm ? 16 : 0) | (nn.mt ? 32 : 0));
+        };
+        for (const nn of notes) if (nn) mixNote(nn);
         for (const ch of _ndChartChords()) {
             const members = (ch && ch.notes) || [];
             c += members.length;
             mix(Math.round((ch && Number.isFinite(ch.t) ? ch.t : 0) * 1000));
-            // Each constituent's string/fret, not just how many there are: a
-            // difficulty change can swap a chord's VOICING at the same onset with
-            // the same member count, and the engine would keep scoring the old
-            // frets. Mirrors the flattened payload _ndPushChartToBridge() sends.
-            for (const m of members) if (m) mix(((m.s | 0) * 100) + (m.f | 0));
+            // Each constituent in full, not just how many there are: a difficulty
+            // change can swap a chord's VOICING at the same onset with the same
+            // member count, and the engine would keep scoring the old frets.
+            // Mirrors the flattened payload _ndPushChartToBridge() sends.
+            for (const m of members) if (m) mixNote({ ...m, t: (ch && ch.t) });
         }
         // timingTolerance / pitchTolerance are part of the signature so moving
         // a tolerance slider re-pushes the chart and the engine picks the new
@@ -16121,6 +16150,14 @@ function createNoteDetector(options = {}) {
                         capo:         (info.capo != null) ? info.capo : null,
                         format:       info.format || null,
                         duration_s:   (info.duration != null) ? info.duration : null,
+                        // The difficulty this take was PLAYED at. arrangement.json
+                        // is the filtered chart, so it already matches the audio —
+                        // these let a consumer segment the dataset by difficulty
+                        // (and spot a reduced take) instead of being blind to it.
+                        // has_phrase_data false => the song has no phrase data, so
+                        // no filtering was possible and the chart is the full one.
+                        mastery:          chartSnapshot ? chartSnapshot.mastery : null,
+                        has_phrase_data:  chartSnapshot ? !!chartSnapshot.hasPhraseData : false,
                     },
                     settings: {
                         detection_method:        detectionMethod,
@@ -16187,7 +16224,9 @@ function createNoteDetector(options = {}) {
                             // pinned at song:ended) — the server writes it
                             // into the bundle as arrangement.json. null when
                             // the host exposed no chart.
-                            arrangement: chartSnapshot || null,
+                            arrangement: chartSnapshot
+                                ? { notes: chartSnapshot.notes, chords: chartSnapshot.chords }
+                                : null,
                             upload_url: uploadUrl,
                         }),
                     });
@@ -16307,13 +16346,10 @@ function createNoteDetector(options = {}) {
                 const cdlcFilenameAtEnd =
                     (songInfoAtEnd && songInfoAtEnd.filename)
                     || _ndShared.currentFilename || '';
-                // Pin the ground-truth note chart too — the arrangement
-                // the highway rendered. hw.getNotes()/getChords() return
-                // {} once the user navigates away, same as getSongInfo().
-                const chartAtEnd = {
-                    notes:  (hw && hw.getNotes)  ? hw.getNotes()  : null,
-                    chords: (hw && hw.getChords) ? hw.getChords() : null,
-                };
+                // Pinned at song:ended — getNotes()/getChords() return {} once the
+                // user navigates away, same as getSongInfo(). Filtered + mastery —
+                // see _ndTrainingChartSnapshot for why.
+                const chartAtEnd = _ndTrainingChartSnapshot();
                 // Pin the audio counters too — saveRecordingNow() resets
                 // _recTotalSamples / _recCappedAt once the WAV POST
                 // succeeds, and that runs before _uploadTrainingBundle
@@ -18320,6 +18356,8 @@ function createNoteDetector(options = {}) {
         // Anchors the A/V sweep will actually use — singles, or the chord
         // constituents when a reduced difficulty leaves no singles (feedback#226).
         _calibrationNotes: () => _ndCalibrationNotes(),
+        // The chart + difficulty the training bundle would pin for this take.
+        _trainingChartSnapshot: () => _ndTrainingChartSnapshot(),
         _runAutoCalibrate: () => _ndRunAutoCalibrate(),
         // Lifecycle-test hooks: inspect/seed the calibration take without the
         // audio pipeline, so the song:play/pause/loaded reset+resume rules are

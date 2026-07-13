@@ -176,6 +176,33 @@ test('a difficulty change that keeps the same note COUNT still re-pushes', async
     await flushPendingAsync();
 });
 
+test('a note that gains a sustain or a technique at the same fret still re-pushes', async () => {
+    // Difficulty ladders don't just add notes — they change them. The same note at
+    // the same string/fret can become a sustain, or gain a bend, further up. The
+    // engine is sent sus + technique flags, so the signature must hash them or it
+    // keeps verifying the old ones.
+    const plain = [{ s: 0, f: 1, t: 1.0, sus: 0 }];
+    const sustained = [{ s: 0, f: 1, t: 1.0, sus: 2.0, b: true }];
+    const env = engineSandbox({ filtered: plain });
+    const det = env.createNoteDetector({ isDefault: false });
+    await det.enable();
+    await flushPendingAsync();
+    const detectTick = await driveDetectTick(env.intervalCallbacks, env.calls);
+    assert.equal(typeof detectTick, 'function');
+    assert.equal(env.lastChart().notes[0].sus, 0, 'starts as a staccato note');
+
+    env.setDisplayed(sustained);
+    await detectTick();
+    await flushPendingAsync();
+
+    const pushed = env.lastChart().notes[0];
+    assert.equal(pushed.sus, 2.0, 'the sustain change must re-push');
+    assert.equal(pushed.b, true, 'the technique change must re-push');
+
+    det.destroy();
+    await flushPendingAsync();
+});
+
 test('a chord VOICING swap at the same onset still re-pushes', async () => {
     // Same onset, same member count, different frets — the chord equivalent of
     // the same-count trap above. Hashing only (onset, memberCount) would miss it
@@ -244,6 +271,49 @@ test('calibration still uses singles alone when the chart has them', () => {
         'a chart with singles calibrates on the singles only — unchanged behaviour');
 });
 
+test('the training bundle labels the WAV with the DRAWN chart, and records the mastery', () => {
+    // arrangement.json is the label for the take's audio, and the audio only
+    // contains what the highway drew. Shipping the 100% chart asserts notes that
+    // are not in the WAV — it teaches the detector to expect notes nobody played.
+    // And because the phrase filter lives in the highway and no difficulty was
+    // recorded, the drawn subset was NOT recoverable after the fact. It is now.
+    const core = loadDetectionCore({
+        sandboxBeforeRun(sb) {
+            sb.highway.getNotes = () => FULL.map((n) => ({ ...n }));
+            sb.highway.getChords = () => ([]);
+            sb.highway.getFilteredNotes = () => DISPLAYED.map((n) => ({ ...n }));
+            sb.highway.getFilteredChords = () => ([]);
+            sb.highway.getMastery = () => 0.6;
+            sb.highway.hasPhraseData = () => true;
+        },
+    });
+    const snap = core.createNoteDetector()._trainingChartSnapshot();
+
+    assert.deepEqual(Array.from(snap.notes, (n) => n.t), [1.0, 3.0],
+        'the label must be the chart as DRAWN — the full chart would assert notes '
+        + 'that are not in the recorded audio');
+    assert.equal(snap.mastery, 0.6,
+        'the mastery level must ride along, or a 60% take is indistinguishable from '
+        + 'a 100% take of a sparser song and the dataset cannot be segmented');
+    assert.equal(snap.hasPhraseData, true);
+});
+
+test('a song with no phrase data still ships the full chart as its label', () => {
+    // No phrase data => no filtering was possible => the full chart IS the drawn
+    // chart. has_phrase_data records that, so a consumer can tell this apart from
+    // a filtered take rather than guessing.
+    const core = loadDetectionCore({
+        sandboxBeforeRun(sb) {
+            sb.highway.getNotes = () => FULL.map((n) => ({ ...n }));
+            sb.highway.getChords = () => ([]);
+            sb.highway.hasPhraseData = () => false;
+        },
+    });
+    const snap = core.createNoteDetector()._trainingChartSnapshot();
+    assert.deepEqual(Array.from(snap.notes, (n) => n.t), [1.0, 2.0, 3.0, 4.0]);
+    assert.equal(snap.hasPhraseData, false);
+});
+
 // A behavioural test can only cover the paths this vm can drive (no AudioContext
 // stub → the browser scoring path can't be enabled here). This guards the rest:
 // a scoring path that reads the raw chart directly is the whole bug, so no new
@@ -253,11 +323,6 @@ test('no scoring path reads the unfiltered chart directly', () => {
     const ALLOWED = [
         // Test hook: reports the RAW chart size, on purpose.
         '_calDebug:',
-        // ML training-bundle manifest — pins the chart as ground truth. Whether
-        // that should be the drawn chart or the full one is a separate call
-        // (see feedback#226 discussion); left raw deliberately.
-        'notes:  (hw && hw.getNotes)  ? hw.getNotes()  : null,',
-        'chords: (hw && hw.getChords) ? hw.getChords() : null,',
     ];
     const offenders = [];
     src.split('\n').forEach((line, i) => {
