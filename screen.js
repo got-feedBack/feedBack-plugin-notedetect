@@ -316,7 +316,7 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // exact build that produced it. The script tag has no `import`/`fetch`
 // hook to read package.json at load time, so this is the single
 // hand-maintained constant the diagnostic path keys off of.
-const _ND_VERSION = '1.29.0';
+const _ND_VERSION = '1.31.0';
 
 // Bleed-rescue tuning for the low-bass blind spot. A bass DI's fundamental is
 // weaker than its 2nd harmonic and an open string / neighbour often rings the
@@ -2425,6 +2425,84 @@ function createNoteDetector(options = {}) {
         if (hw) return hw;
         hw = opts.highway || window.highway || null;
         return hw;
+    }
+
+    // The notes the player is actually being asked to play — the chart AS DRAWN.
+    //
+    // The highway filters the chart by the mastery slider, but getNotes() /
+    // getChords() still return every note in the 100% chart. Scoring the raw
+    // arrays retires notes that were never drawn as misses, so playing a lower
+    // difficulty perfectly still tanks the score (feedback#226). Every scoring,
+    // drill and calibration path must read the chart through these instead.
+    //
+    // Safe drop-ins: getFilteredNotes/getFilteredChords fall back to the raw
+    // arrays when the song has no phrase data (single-difficulty charts, GP
+    // imports), and the typeof guard falls back on a core too old to expose
+    // them — so behaviour is unchanged everywhere the filter isn't active.
+    function _ndChartNotes(h) {
+        const x = h || hw;
+        if (!x) return [];
+        if (typeof x.getFilteredNotes === 'function') return x.getFilteredNotes() || [];
+        return (x.getNotes && x.getNotes()) || [];
+    }
+    function _ndChartChords(h) {
+        const x = h || hw;
+        if (!x) return [];
+        if (typeof x.getFilteredChords === 'function') return x.getFilteredChords() || [];
+        return (x.getChords && x.getChords()) || [];
+    }
+
+    // Onset times of everything the player is expected to play — singles AND
+    // chords, sorted. Anything asking "is there anything to play here?" must look
+    // at both: many arrangements deliver chord constituents through getChords()
+    // rather than getNotes(), and a reduced difficulty often boils a passage down
+    // to chord stabs with no standalone notes left. Asking only about notes then
+    // reports an empty chart and bails on perfectly playable material.
+    function _ndChartOnsets(h) {
+        const ts = [];
+        for (const n of _ndChartNotes(h)) if (n && Number.isFinite(n.t)) ts.push(n.t);
+        for (const c of _ndChartChords(h)) if (c && Number.isFinite(c.t)) ts.push(c.t);
+        return ts.sort((a, b) => a - b);
+    }
+
+    // Anchors for the A/V offset sweep. Standalone notes are the primary set — a
+    // monophonic onset is the cleanest thing to correlate a detection against, and
+    // it's what the sweep was tuned on — so this deliberately does NOT widen the
+    // anchor set on a song that has any. But a reduced difficulty can leave a
+    // chart with nothing BUT chords, and reporting "no notes" there skips
+    // calibration silently. Fall back to the chord constituents rather than skip:
+    // flattened onto the chord's onset they're the same {s, f, t} shape the sweep
+    // already takes.
+    // The chart + difficulty the training bundle pins at song:ended. This is the
+    // LABEL for the take's WAV, and the WAV only contains the notes the highway
+    // actually drew — so it is FILTERED. Under a reduced mastery level the 100%
+    // chart asserts notes that are not in the audio, which teaches the detector to
+    // expect notes nobody played. The full chart stays recoverable from
+    // song.filename + arrangement; the drawn subset would NOT be recoverable from
+    // the full chart, because the phrase filter lives in the highway — so this is
+    // the lossless direction.
+    //
+    // mastery / hasPhraseData ride along so a consumer can tell a reduced-difficulty
+    // take from a full one. Without them a take at 60% is indistinguishable from a
+    // 100% take of a sparser song, and the dataset can't be segmented after the fact.
+    function _ndTrainingChartSnapshot() {
+        return {
+            notes:  _ndChartNotes(),
+            chords: _ndChartChords(),
+            mastery: (hw && hw.getMastery) ? hw.getMastery() : null,
+            hasPhraseData: !!(hw && hw.hasPhraseData && hw.hasPhraseData()),
+        };
+    }
+
+    function _ndCalibrationNotes() {
+        const singles = _ndChartNotes().filter((n) => n && Number.isFinite(n.t));
+        if (singles.length) return singles;
+        const out = [];
+        for (const c of _ndChartChords()) {
+            if (!c || !Number.isFinite(c.t)) continue;
+            for (const m of (c.notes || [])) if (m) out.push({ ...m, t: c.t });
+        }
+        return out;
     }
     const isDefault = !!opts.isDefault;
 
@@ -5907,8 +5985,8 @@ function createNoteDetector(options = {}) {
         // The single-note path below is gated on detectedMidi >= 0 and
         // skips itself when detection wasn't confident.
 
-        const notes = hw.getNotes();
-        const chords = hw.getChords();
+        const notes = _ndChartNotes();
+        const chords = _ndChartChords();
 
         // Timing-free verify target. Run it AFTER snapshotting t / notes /
         // chords above so the awaited scoreChord IPC (bridge path) can't shift
@@ -6538,8 +6616,8 @@ function createNoteDetector(options = {}) {
         // hit. Cap matches matchNotes (kept loosely in sync via the
         // same constant pattern so both paths shift together).
         const MAX_SUS_LATE_GRACE = 1.0;
-        const notes = hw.getNotes();
-        const chords = hw.getChords();
+        const notes = _ndChartNotes();
+        const chords = _ndChartChords();
 
         // Pass the full chart-note object (not just {s, f}) so the miss
         // judgment carries `sus` and technique flags through to the
@@ -12195,8 +12273,8 @@ function createNoteDetector(options = {}) {
 
         const t = hw.getTime();
         const renderT = t + (hw.getAvOffset ? hw.getAvOffset() / 1000 : 0);
-        const notes = hw.getNotes();
-        const chords = hw.getChords();
+        const notes = _ndChartNotes();
+        const chords = _ndChartChords();
 
         const drawTextReadable = (text, x, y) => {
             if (hw.fillTextUnmirrored) hw.fillTextUnmirrored(text, x, y);
@@ -12707,11 +12785,10 @@ function createNoteDetector(options = {}) {
         // First-note runway: pull judgeStart back so the first scored
         // note always has reaction time, even when the cluster boundary
         // lands right on it.
-        const allNotes = (_hw && _hw.getNotes && _hw.getNotes()) || [];
-        const firstNote = allNotes.find(n => n && Number.isFinite(n.t)
-            && n.t >= requestedStart && n.t <= judgeEnd);
-        const judgeStart = firstNote
-            ? Math.max(0, Math.min(requestedStart, firstNote.t - _ND_DRILL_FIRST_NOTE_RUNWAY_SEC))
+        const firstOnset = _ndChartOnsets(_hw)
+            .find(t => t >= requestedStart && t <= judgeEnd);
+        const judgeStart = Number.isFinite(firstOnset)
+            ? Math.max(0, Math.min(requestedStart, firstOnset - _ND_DRILL_FIRST_NOTE_RUNWAY_SEC))
             : requestedStart;
         const loopStart = Math.max(0, judgeStart - _ND_DRILL_LEAD_IN_SEC);
         const loopEnd = judgeEnd;
@@ -12830,10 +12907,9 @@ function createNoteDetector(options = {}) {
 
         // A drill window with no notes can never clear the goal, so it loops
         // forever — the "stuck 2s loop at the intro" bug. Require notes.
-        const notes = (_hw && _hw.getNotes && _hw.getNotes()) || [];
-        const noteTimes = notes.filter(n => n && Number.isFinite(n.t)).map(n => n.t).sort((x, y) => x - y);
+        const noteTimes = _ndChartOnsets(_hw);
         if (!noteTimes.length) {
-            console.warn('[note_detect] startDrillHere: chart has no notes — aborting');
+            console.warn('[note_detect] startDrillHere: chart has nothing to play — aborting');
             return Promise.resolve(false);
         }
 
@@ -12964,9 +13040,9 @@ function createNoteDetector(options = {}) {
             return t != null && t >= a && t <= b;
         };
         let n = 0;
-        const notes = (_hw.getNotes && _hw.getNotes()) || [];
+        const notes = _ndChartNotes(_hw);
         for (const x of notes) if (inWin(x)) n++;
-        const chords = (_hw.getChords && _hw.getChords()) || [];
+        const chords = _ndChartChords(_hw);
         for (const x of chords) if (inWin(x)) n++;
         return n;
     }
@@ -13572,23 +13648,50 @@ function createNoteDetector(options = {}) {
     // should be scoring changes (late load, song change, arrangement switch).
     function _ndChartSignature() {
         if (!hw || typeof hw.getNotes !== 'function') return '';
-        const notes = hw.getNotes() || [];
+        // Filtered, so MOVING THE MASTERY SLIDER changes the signature and the
+        // detect loop re-pushes the reduced chart to the engine (feedback#226).
+        const notes = _ndChartNotes();
         const n = notes.length;
         let c = 0;
-        for (const ch of (hw.getChords() || [])) c += ((ch && ch.notes) || []).length;
-        // Cheap content discriminator: first + last note onset time. Two
-        // different songs with the same note/chord counts and arrangement
-        // would otherwise hash identically, leaving a stale chart on the
-        // engine if a song:loaded handler ever misfired.
-        const firstT = n > 0 && Number.isFinite(notes[0].t) ? notes[0].t : 0;
-        const lastT = n > 0 && Number.isFinite(notes[n - 1].t) ? notes[n - 1].t : 0;
+        // Content hash over the note/chord IDENTITIES, not just how many there
+        // are. Counts + first/last onset were enough when the chart only changed
+        // on song/arrangement load, but the mastery slider can swap WHICH notes
+        // are displayed without changing HOW MANY — two slider positions with the
+        // same total would hash identically and leave the engine scoring a chart
+        // that is no longer on screen. FNV-1a over (t, s, f); O(chart) on the
+        // 50 ms tick is nothing beside the FFT work already on this path.
+        let fnv = 0x811c9dc5;
+        const mix = (v) => { fnv ^= (v | 0); fnv = Math.imul(fnv, 0x01000193); };
+        // Hash EVERY field _ndPushChartToBridge actually sends, not just position:
+        // a difficulty level can swap in the same note at the same string/fret with
+        // a different sustain or technique (a note that becomes a sustain, or gains
+        // a bend, higher up the ladder). Hashing only t/s/f would leave the engine
+        // verifying stale sus/technique data against the new chart.
+        const mixNote = (nn) => {
+            mix(Math.round((Number.isFinite(nn.t) ? nn.t : 0) * 1000));
+            mix(((nn.s | 0) * 100) + (nn.f | 0));
+            mix(Math.round((Number.isFinite(nn.sus) ? nn.sus : 0) * 1000));
+            mix((nn.ho ? 1 : 0) | (nn.po ? 2 : 0) | (nn.b ? 4 : 0)
+                | (nn.sl ? 8 : 0) | (nn.hm ? 16 : 0) | (nn.mt ? 32 : 0));
+        };
+        for (const nn of notes) if (nn) mixNote(nn);
+        for (const ch of _ndChartChords()) {
+            const members = (ch && ch.notes) || [];
+            c += members.length;
+            mix(Math.round((ch && Number.isFinite(ch.t) ? ch.t : 0) * 1000));
+            // Each constituent in full, not just how many there are: a difficulty
+            // change can swap a chord's VOICING at the same onset with the same
+            // member count, and the engine would keep scoring the old frets.
+            // Mirrors the flattened payload _ndPushChartToBridge() sends.
+            for (const m of members) if (m) mixNote({ ...m, t: (ch && ch.t) });
+        }
         // timingTolerance / pitchTolerance are part of the signature so moving
         // a tolerance slider re-pushes the chart and the engine picks the new
         // value up live — without this the popup sliders are inert on the
         // engine-verifier path until the next song/arrangement change.
         return n + ':' + c + ':' + currentArrangement + ':' + currentStringCount
             + ':' + capo + ':' + timingTolerance + ':' + pitchTolerance
-            + ':' + firstT + ':' + lastT;
+            + ':' + (fnv >>> 0);
     }
 
     async function _ndPushChartToBridge() {
@@ -13626,7 +13729,7 @@ function createNoteDetector(options = {}) {
         const chordKeyById = new Map();
         // Single notes. `mt` (muted) notes are skipped — the legacy
         // matchNotes path skips them too (`if (n.mt) continue`).
-        const single = hw.getNotes() || [];
+        const single = _ndChartNotes();
         for (const n of single) {
             if (!n || n.mt) continue;
             const id = noteKey(n, n.t);
@@ -13642,9 +13745,9 @@ function createNoteDetector(options = {}) {
             notes.push(entry);
             byId.set(id, { ...n });
         }
-        // Chord constituents from hw.getChords() — pushed as plain notes;
-        // chord grouping happens by timestamp below.
-        const chords = hw.getChords() || [];
+        // Chord constituents from the (filtered) chart — pushed as plain
+        // notes; chord grouping happens by timestamp below.
+        const chords = _ndChartChords();
         for (const c of chords) {
             for (const cn of (c.notes || [])) {
                 if (!cn || cn.mt) continue;
@@ -16047,6 +16150,14 @@ function createNoteDetector(options = {}) {
                         capo:         (info.capo != null) ? info.capo : null,
                         format:       info.format || null,
                         duration_s:   (info.duration != null) ? info.duration : null,
+                        // The difficulty this take was PLAYED at. arrangement.json
+                        // is the filtered chart, so it already matches the audio —
+                        // these let a consumer segment the dataset by difficulty
+                        // (and spot a reduced take) instead of being blind to it.
+                        // has_phrase_data false => the song has no phrase data, so
+                        // no filtering was possible and the chart is the full one.
+                        mastery:          chartSnapshot ? chartSnapshot.mastery : null,
+                        has_phrase_data:  chartSnapshot ? !!chartSnapshot.hasPhraseData : false,
                     },
                     settings: {
                         detection_method:        detectionMethod,
@@ -16113,7 +16224,9 @@ function createNoteDetector(options = {}) {
                             // pinned at song:ended) — the server writes it
                             // into the bundle as arrangement.json. null when
                             // the host exposed no chart.
-                            arrangement: chartSnapshot || null,
+                            arrangement: chartSnapshot
+                                ? { notes: chartSnapshot.notes, chords: chartSnapshot.chords }
+                                : null,
                             upload_url: uploadUrl,
                         }),
                     });
@@ -16233,13 +16346,10 @@ function createNoteDetector(options = {}) {
                 const cdlcFilenameAtEnd =
                     (songInfoAtEnd && songInfoAtEnd.filename)
                     || _ndShared.currentFilename || '';
-                // Pin the ground-truth note chart too — the arrangement
-                // the highway rendered. hw.getNotes()/getChords() return
-                // {} once the user navigates away, same as getSongInfo().
-                const chartAtEnd = {
-                    notes:  (hw && hw.getNotes)  ? hw.getNotes()  : null,
-                    chords: (hw && hw.getChords) ? hw.getChords() : null,
-                };
+                // Pinned at song:ended — getNotes()/getChords() return {} once the
+                // user navigates away, same as getSongInfo(). Filtered + mastery —
+                // see _ndTrainingChartSnapshot for why.
+                const chartAtEnd = _ndTrainingChartSnapshot();
                 // Pin the audio counters too — saveRecordingNow() resets
                 // _recTotalSamples / _recCappedAt once the WAV POST
                 // succeeds, and that runs before _uploadTrainingBundle
@@ -16447,7 +16557,7 @@ function createNoteDetector(options = {}) {
         if (!detectPreference) return 'detect off (user)';
         if (_calDoneThisPlay) return 'already done this play';
         if (typeof window.setAvOffsetMs !== 'function') return 'no window.setAvOffsetMs';
-        const notes = (hw && hw.getNotes) ? hw.getNotes() : null;
+        const notes = _ndCalibrationNotes();
         if (!notes || !notes.length) return 'no notes';
         const geom = { arrangement: currentArrangement, stringCount: currentStringCount, offsets: tuningOffsets, capo };
         const r = _ndCalibrateOffsetMs(_calDetections, notes, geom, timingHitThreshold, pitchTolerance, {});
@@ -18243,6 +18353,11 @@ function createNoteDetector(options = {}) {
         // headless run can see whether the log fills and why calibrate no-ops.
         _calDebug: () => ({ detections: _calDetections.length, subscribed: _calSubscribed, autoCalibrate, isDefault, notes: (hw && hw.getNotes) ? (hw.getNotes() || []).length : -1 }),
         _calDetectionsDump: () => _calDetections.slice(),
+        // Anchors the A/V sweep will actually use — singles, or the chord
+        // constituents when a reduced difficulty leaves no singles (feedback#226).
+        _calibrationNotes: () => _ndCalibrationNotes(),
+        // The chart + difficulty the training bundle would pin for this take.
+        _trainingChartSnapshot: () => _ndTrainingChartSnapshot(),
         _runAutoCalibrate: () => _ndRunAutoCalibrate(),
         // Lifecycle-test hooks: inspect/seed the calibration take without the
         // audio pipeline, so the song:play/pause/loaded reset+resume rules are
