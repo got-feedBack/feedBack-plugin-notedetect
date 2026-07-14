@@ -257,6 +257,21 @@ function _ndSyncMlGate(token, wantsMl, audio) {
     if (wantsMl) wanters.add(token); else wanters.delete(token);
     const desired = wanters.size > 0;
     if (desired === _ndShared.mlGateOn) return;          // already in the right state
+    // Preferred path (ownership plan 6.3): express arming as a refcounted
+    // registry demand instead of the raw boolean — the engine keeps ML armed
+    // while ANY holder (us, strum-fighter, highway_3d) needs it, so our
+    // disarm can no longer kill a concurrent consumer's detection, and a
+    // dead renderer releases the arm automatically (no leaked ONNX burn).
+    // The per-instance wanters set above stays: it collapses our N instances
+    // into one demand.
+    if (typeof audio?.leases?.acquireDemand === 'function') {
+        try {
+            if (desired) audio.leases.acquireDemand('detection:desktop-main', 'notedetect');
+            else audio.leases.releaseDemand('detection:desktop-main', 'notedetect');
+            _ndShared.mlGateOn = desired;                // commit only on success → retries on failure
+        } catch (_) { /* transient — leave state so a later sync retries */ }
+        return;
+    }
     if (!audio || typeof audio.setNoteDetectionEnabled !== 'function') return;
     try {
         audio.setNoteDetectionEnabled(desired);
@@ -3379,6 +3394,8 @@ function createNoteDetector(options = {}) {
     // existing Web-Audio teardown in stopAudio() is null-checked, so it
     // doesn't need its own branch on this flag.
     let usingDesktopBridge = false;
+// Whether we hold the engine `capture` demand (ownership plan 6.1).
+let _ndHoldsCaptureDemand = false;
     // Per-instance identity for the cross-instance ML gate refcount.
     const _ndGateToken = {};
     // Arm/suspend engine ML for THIS instance. ML is read only when the per-tick
@@ -3957,11 +3974,19 @@ function createNoteDetector(options = {}) {
                     // (When open-source above handled it, the engine is already
                     // running on the selected device, so this is a no-op.)
                     try {
-                        const running = typeof desktop.audio.isAudioRunning === 'function'
-                            ? await desktop.audio.isAudioRunning()
-                            : false;
-                        if (!running && typeof desktop.audio.startAudio === 'function') {
-                            await desktop.audio.startAudio();
+                        if (typeof desktop.audio.leases?.acquireDemand === 'function') {
+                            // Ownership plan 6.1: refcounted capture demand
+                            // instead of raw start — the engine runs while any
+                            // holder needs it; released on disable/death.
+                            await desktop.audio.leases.acquireDemand('capture', 'notedetect');
+                            _ndHoldsCaptureDemand = true;
+                        } else {
+                            const running = typeof desktop.audio.isAudioRunning === 'function'
+                                ? await desktop.audio.isAudioRunning()
+                                : false;
+                            if (!running && typeof desktop.audio.startAudio === 'function') {
+                                await desktop.audio.startAudio();
+                            }
                         }
                     } catch (_) { /* engine surfaces its own errors */ }
 
@@ -4680,10 +4705,15 @@ function createNoteDetector(options = {}) {
         stopBridgeLevelMeter();
         if (detectInterval) { clearInterval(detectInterval); detectInterval = null; }
         pendingBuffer = null;
-        // Bridge path doesn't own the JUCE engine — leave audio
-        // running for the Audio Plugins panel / other features. Drop
-        // the cached preload reference and the flag so a subsequent
-        // enable re-resolves window.feedBackDesktop fresh.
+        // Bridge path doesn't own the JUCE engine — release our capture
+        // demand (the engine keeps running while any other holder needs it,
+        // e.g. the Audio Plugins panel's user start). Drop the cached preload
+        // reference and the flag so a subsequent enable re-resolves
+        // window.feedBackDesktop fresh.
+        if (_ndHoldsCaptureDemand) {
+            _ndHoldsCaptureDemand = false;
+            try { bridgeDesktop?.audio?.leases?.releaseDemand('capture', 'notedetect'); } catch (_) {}
+        }
         usingDesktopBridge = false;
         usingNativeFrames = false;
         bridgeDesktop = null;
