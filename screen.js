@@ -14577,7 +14577,13 @@ function createNoteDetector(options = {}) {
     // Narrow on purpose: only the 'gig' queue source. A playlist or album keeps
     // its per-song summary, which is what people already expect there.
     function _inGigSet() {
-        const q = window.feedBack && window.feedBack.playQueue;
+        // Same lookup showSummary's Up-Next wiring uses, including the legacy
+        // `slopsmith` alias: a host that exposes only that one would otherwise
+        // look queue-less here, and the popup would come back in gigs on exactly
+        // the builds least likely to be tested.
+        const q = (window.feedBack && window.feedBack.playQueue)
+            || (window.slopsmith && window.slopsmith.playQueue)
+            || null;
         if (!q || typeof q.active !== 'function' || typeof q.source !== 'function') return false;
         try { return q.active() && q.source() === 'gig'; } catch (_) { return false; }
     }

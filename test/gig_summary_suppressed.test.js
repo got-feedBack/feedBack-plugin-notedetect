@@ -55,9 +55,34 @@ test('the gig check runs BEFORE the summary is built', () => {
         'the gig path must RETURN out of the handler, not fall through');
 });
 
+// Extract ONLY the body of `if (_inGigSet()) { ... }`.
+//
+// The first version of this sliced from the `if` to the end of the function, so
+// every assertion below could have been satisfied by the NON-gig path further
+// down — which calls _submitSongXp() and disable({silent:true}) too. It would
+// have passed even if the gig branch were empty. Bound it properly: a test that
+// can pass for the wrong reason is worse than no test.
+function gigBranch(src) {
+    const fn = extractBlock(src, 'function _endOfSongOnEnded()');
+    const at = fn.search(/if\s*\(\s*_inGigSet\s*\(\s*\)\s*\)/);
+    assert.ok(at !== -1, 'gig guard not found');
+    const open = fn.indexOf('{', at);
+    let depth = 1, i = open + 1;
+    while (i < fn.length && depth > 0) {
+        if (fn[i] === '{') depth++;
+        else if (fn[i] === '}') depth--;
+        i++;
+    }
+    assert.ok(depth === 0, 'unbalanced braces in the gig branch');
+    const body = fn.slice(open + 1, i - 1);
+    // Sanity: the branch must not have swallowed the whole function.
+    assert.ok(!/showSummary\s*\(/.test(body),
+        'the extracted branch must be the GIG path only — it must not contain showSummary');
+    return body;
+}
+
 test('a gig song still earns its XP and still tears the detector down', () => {
-    const fn = extractBlock(SRC, 'function _endOfSongOnEnded()');
-    const gigBlock = fn.slice(fn.search(/if\s*\(\s*_inGigSet\s*\(\s*\)\s*\)/));
+    const gigBlock = gigBranch(SRC);
     assert.match(gigBlock, /_submitSongXp\s*\(\s*\)/,
         "suppressing the overlay must not silently drop the take's XP");
     assert.match(gigBlock, /_summaryWorthy\s*\(\s*\)/,
@@ -82,4 +107,26 @@ test('showSummary and the gig path share one judgment threshold', () => {
     const show = extractBlock(SRC, 'function showSummary(opts)');
     assert.match(show, /_summaryWorthy\s*\(\s*\)/,
         'showSummary must use the shared gate, not a second inline `total < 5`');
+});
+
+test('the legacy slopsmith.playQueue alias is honoured', () => {
+    const fn = extractBlock(SRC, 'function _inGigSet()');
+    assert.match(fn, /window\.feedBack\s*&&\s*window\.feedBack\.playQueue/,
+        'the modern bus first');
+    assert.match(fn, /window\.slopsmith\s*&&\s*window\.slopsmith\.playQueue/,
+        'a host exposing only the legacy alias would otherwise look queue-less, and the ' +
+        'popup would come back in gigs on exactly the builds least likely to be tested ' +
+        '(showSummary already falls back this way)');
+});
+
+test('the gig-branch extractor is genuinely bounded', () => {
+    // Guards the guard: if gigBranch() ever ran past the `if` block again, the
+    // assertions above could be satisfied by the non-gig path, which also calls
+    // _submitSongXp() and disable({silent:true}).
+    const body = gigBranch(SRC);
+    assert.ok(body.length > 0);
+    assert.ok(!/showSummary/.test(body));
+    const whole = extractBlock(SRC, 'function _endOfSongOnEnded()');
+    assert.ok(body.length < whole.length / 2,
+        'the gig branch is a small early-return, not most of the function');
 });
