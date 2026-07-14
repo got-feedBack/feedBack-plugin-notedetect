@@ -14560,9 +14560,45 @@ function createNoteDetector(options = {}) {
     // also doubles the journal event). The user re-enables for the
     // next track the same way they already do today — the playSong
     // wrapper silent-disables on song-switch regardless.
+    // A take is only worth a summary (and the XP that rides with it) once the
+    // player has actually played something. Was inline in showSummary; the gig
+    // path below needs the same answer without building an overlay.
+    const _SUMMARY_MIN_JUDGMENTS = 5;
+    function _summaryWorthy() {
+        return (hits + misses) >= _SUMMARY_MIN_JUDGMENTS;
+    }
+
+    // A gig is a SET: the career plugin shows ONE card at the end of it, scoring
+    // every song played. A per-song summary on top of that is wrong twice over —
+    // it interrupts the set with a popup after each song, and (worse) it
+    // claimAutoExit's, so the host's play queue would not advance to the next
+    // song until the player dismissed it. The set stalled on a popup every time.
+    //
+    // Narrow on purpose: only the 'gig' queue source. A playlist or album keeps
+    // its per-song summary, which is what people already expect there.
+    function _inGigSet() {
+        const q = window.feedBack && window.feedBack.playQueue;
+        if (!q || typeof q.active !== 'function' || typeof q.source !== 'function') return false;
+        try { return q.active() && q.source() === 'gig'; } catch (_) { return false; }
+    }
+
     function _endOfSongOnEnded() {
         if (!isDefault) return;
         if (!enabled) return;
+
+        // In a gig, skip the overlay — but still credit the take, exactly as a
+        // built summary would have (same _summaryWorthy() gate showSummary
+        // applies), and still tear the detector down between songs.
+        if (_inGigSet()) {
+            try {
+                if (_summaryWorthy()) _submitSongXp();
+            } catch (e) {
+                console.warn('[note_detect] gig-song XP failed:', e && e.message ? e.message : e);
+            }
+            try { disable({ silent: true }); } catch (e) { /* teardown is best-effort */ }
+            return;
+        }
+
         // showSummary() has its own `total < 5` guard, so a song that
         // ended before the user played anything meaningful is silently
         // skipped. When a training take is armed, _recOnEnded opens the
@@ -17152,8 +17188,8 @@ function createNoteDetector(options = {}) {
     // (fewer than 5 judgments) — callers deferring the summary use this
     // to know whether there is actually an overlay to reveal later.
     function showSummary(opts) {
+        if (!_summaryWorthy()) return false;
         const total = hits + misses;
-        if (total < 5) return false;
 
         const existing = instanceRoot.querySelector('.nd-summary-overlay');
         if (existing) { existing.remove(); _ndAutoExitRelease = null; }
