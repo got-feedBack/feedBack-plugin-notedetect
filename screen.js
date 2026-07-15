@@ -316,7 +316,7 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // exact build that produced it. The script tag has no `import`/`fetch`
 // hook to read package.json at load time, so this is the single
 // hand-maintained constant the diagnostic path keys off of.
-const _ND_VERSION = '1.31.0';
+const _ND_VERSION = '1.32.0';
 
 // Bleed-rescue tuning for the low-bass blind spot. A bass DI's fundamental is
 // weaker than its 2nd harmonic and an open string / neighbour often rings the
@@ -329,6 +329,18 @@ const _ND_HARMONIC_FALLBACK_RATIOS = [1, 2, 3, 4, 5];
 const _ND_HARMONIC_FALLBACK_HALF_CENTS = 80; // ±half-window around each harmonic (≈1.5 coarse low bins)
 const _ND_HARMONIC_FALLBACK_PEAK_FRAC = 0.40; // each counted harmonic ≥ this fraction of the band peak
 const _ND_HARMONIC_FALLBACK_MIN_HARMONICS = 3; // need this many coherent harmonics to accept
+
+// Low-energy comb rescue for low power chords (E5/A5/B5 near the nut) played
+// with distortion or palm-muting. Those pile energy into upper harmonics, so
+// the fundamental's own band drops below the 3% "ringing" bar even though the
+// note is plainly there — the string reads silent and the chord bins as a
+// "partial chord" miss (the tester's report). Below the 3% gate but at/above
+// this floor, a low note is not conceded on energy alone: the same strict
+// harmonic-comb test above must confirm it. The floor keeps a genuinely dead
+// string out — a low string's band already holds ~1% of a flat-noise spectrum
+// just from its width, so the floor sits clear of that. Calibration knob: if
+// on-device chugs still miss, lower it and watch for false positives.
+const _ND_LOW_ENERGY_RESCUE_FLOOR = 0.015; // band-energy fraction; rescue eligible in [floor, 0.03)
 // Post-miss PRESENCE check (coaching fault attribution, not hit/miss): how many
 // coherent harmonics of the expected note must appear for us to say the player
 // DID play it (so the miss is a detector blind-spot, not a no-play).
@@ -1967,8 +1979,23 @@ function _ndConstraintCheckString(
     const { magnitudes, binHz } = precomputedSpectrum || _ndFftMagnitude(buffer, sampleRate);
     const [loHz, hiHz] = _ndStringBandHz(stringIdx, arrangement, stringCount, offsets, capo);
 
+    const expectedMidi = _ndMidiFromStringFret(stringIdx, fret, arrangement, stringCount, offsets, capo);
+    const expectedHz = 440 * Math.pow(2, (expectedMidi - 69) / 12);
+
     const bandEnergy = _ndBandEnergy(magnitudes, binHz, loHz, hiHz, precomputedTotalEnergy);
-    if (bandEnergy < energyThreshold) {
+    const energyOk = bandEnergy >= energyThreshold;
+
+    // Low-energy comb rescue eligibility: a sub-3% band can still be a real low
+    // note whose fundamental was diluted by distortion/palm-mute (see
+    // _ND_LOW_ENERGY_RESCUE_FLOOR). Only a low expected pitch, with pitch
+    // checking on and the band above the silence floor, gets a second look —
+    // the harmonic-comb confirmation happens on the pitch path below. Everything
+    // else concedes on energy exactly as before.
+    const combRescueEligible = pitchCheckCents > 0
+        && expectedHz <= _ND_HARMONIC_FALLBACK_MAX_HZ
+        && bandEnergy >= _ND_LOW_ENERGY_RESCUE_FLOOR;
+
+    if (!energyOk && !combRescueEligible) {
         return { hit: false, bandEnergy, centsDiff: null, centsError: null };
     }
 
@@ -1990,25 +2017,31 @@ function _ndConstraintCheckString(
         : 0;
     const detectedHz = (peakBin + delta) * binHz;
 
-    const expectedMidi = _ndMidiFromStringFret(stringIdx, fret, arrangement, stringCount, offsets, capo);
-    const expectedHz = 440 * Math.pow(2, (expectedMidi - 69) / 12);
     const rawCentsError = 1200 * Math.log2(detectedHz / expectedHz);
     const centsError = _ndFoldOctaveCents(rawCentsError);
     const centsDiff = Math.abs(centsError);
 
-    let hit = centsDiff <= pitchCheckCents;
-    // Bleed rescue for the low blind spot: the single-peak read above grabbed
-    // the loudest bin in the whole band, which on bass is often an open string
-    // or neighbour ringing under the fretted note — so a present low note gets
-    // rejected. When the cents check fails AND the expected fundamental is low,
-    // fall back to confirming the EXPECTED note's harmonic comb directly. Purely
-    // additive (it can only turn a miss into a hit, never the reverse) and gated
-    // on a low expectedHz, so this fallback never fires for guitar. NB the
-    // branch's rescue + miss-attribution are all bass-gated, but the per-frame
-    // level/diagnostic recording it feeds (processFrame level history,
-    // _wasSilentAtNote, _ndStrikeLevelContext) is a deliberate cross-arrangement
-    // change that DOES run on browser guitar — it is diagnostics-only and never
-    // affects guitar hit/miss/score. See _ND_HARMONIC_FALLBACK_*.
+    // A clean pitch hit needs the energy gate too. Below the gate (a
+    // rescue-eligible low note) only the harmonic comb can grant the hit — a
+    // coincidentally on-pitch dominant bin in a sub-threshold band is exactly
+    // the bleed the comb is there to reject.
+    let hit = energyOk && centsDiff <= pitchCheckCents;
+    // Harmonic-comb rescue for the low blind spot. Confirms the EXPECTED note
+    // directly by its harmonic comb, catching two failure modes for low notes
+    // (≤140Hz, so never guitar mid/high):
+    //   • pitch-check fail with energy present — the single-peak read above
+    //     grabbed a bleed/neighbour (an open string or the octave ringing under
+    //     the fretted note), common on bass DI; and
+    //   • energy-gate fail — a low power chord near the nut (E5/A5/B5) under
+    //     distortion or palm-muting whose fundamental band fell below 3%
+    //     (combRescueEligible let it reach here). This is the guitar case the
+    //     tester reported; the comment used to claim this "never fires for
+    //     guitar" — it does now, by design.
+    // Purely additive (only ever turns a miss into a hit) and the strict comb
+    // (≥3 ratio-locked local-max peaks) is what keeps bleed from being credited.
+    // NB the per-frame level/diagnostic recording this branch feeds (processFrame
+    // level history, _wasSilentAtNote, _ndStrikeLevelContext) is diagnostics-only
+    // and never affects hit/miss/score. See _ND_HARMONIC_FALLBACK_*.
     if (!hit && expectedHz <= _ND_HARMONIC_FALLBACK_MAX_HZ
         && _ndHarmonicCoherenceLow(magnitudes, binHz, expectedHz, peakVal)) {
         hit = true;

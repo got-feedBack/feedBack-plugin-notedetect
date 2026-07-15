@@ -229,6 +229,87 @@ test('scoreChord: hammer-on flag lowers energy threshold so weak in-band signal 
         `expected ho:true to lower threshold and hit (bandEnergy=${hammered.results[0].bandEnergy.toFixed(4)})`);
 });
 
+// ── low-energy comb rescue (distorted / palm-muted low power chords) ────────
+//
+// A low power chord near the nut (E5/A5/B5) under distortion or palm-muting
+// piles energy into upper harmonics, so the fundamental's own band drops below
+// the 3% "ringing" bar even though the note is plainly there — the string reads
+// silent and the chord bins as a "partial chord" miss (the tester's report).
+// The rescue: below 3% but above the silence floor, a LOW expected note
+// (≤140Hz) is confirmed by its harmonic comb instead of conceded on energy.
+// Build a low-E comb (fundamental + harmonics 2-4, all inside the string-0
+// band) plus strong out-of-band "distortion" tones that inflate total-spectrum
+// energy, pushing the low band below 3%.
+function _lowNoteWithDistortion(combHarmonics, combAmp, distAmp) {
+    const n = BUF_SAMPLES;
+    const buf = new Float32Array(n);
+    const dist = [900, 1400, 2100, 2800, 3600, 4500, 5400, 6300, 7200, 8100];
+    for (const f of combHarmonics) for (let i = 0; i < n; i++) buf[i] += combAmp * Math.sin(2 * Math.PI * f * i / SR);
+    for (const f of dist) for (let i = 0; i < n; i++) buf[i] += distAmp * Math.sin(2 * Math.PI * f * i / SR);
+    let peak = 0;
+    for (let i = 0; i < n; i++) if (Math.abs(buf[i]) > peak) peak = Math.abs(buf[i]);
+    if (peak > 0) for (let i = 0; i < n; i++) buf[i] *= 0.9 / peak;
+    return buf;
+}
+// Low-E comb: E2 fundamental + harmonics 2-4, all within string 0's [74,363] band.
+const LOW_E_COMB = [82.41, 164.81, 247.22, 329.63];
+
+test('lowEnergyRescue: a sub-3% low note with a coherent comb is rescued to a hit', () => {
+    // Band energy diluted to ~1.7% (below the 3% gate, above the 1.5% floor).
+    // Without the rescue this string reads "not ringing"; the comb confirms it.
+    const buf = _lowNoteWithDistortion(LOW_E_COMB, 0.5, 2.4);
+    const r = core.constraintCheckString(buf, SR, 0, 0,
+        'guitar', 6, GUITAR_6.offsets, 0, /*pitchCheckCents*/ 50);
+    assert.ok(r.bandEnergy < 0.03, `bandEnergy ${r.bandEnergy.toFixed(4)} must be below the 3% gate for this to test the rescue`);
+    assert.ok(r.bandEnergy >= 0.015, `bandEnergy ${r.bandEnergy.toFixed(4)} must be above the silence floor`);
+    assert.equal(r.hit, true, 'a low note whose harmonic comb is present must be rescued below the energy gate');
+    assert.ok(Number.isFinite(r.centsDiff), 'rescued hit must carry a finite centsDiff so voicing-reduction counts it');
+});
+
+test('lowEnergyRescue: distortion alone (no low comb) stays a miss', () => {
+    // Same out-of-band energy, but no low note played — nothing to rescue.
+    const buf = _lowNoteWithDistortion([], 0, 2.4);
+    const r = core.constraintCheckString(buf, SR, 0, 0,
+        'guitar', 6, GUITAR_6.offsets, 0, 50);
+    assert.equal(r.hit, false, 'no low fundamental present → no rescue');
+});
+
+test('lowEnergyRescue: silence floor blocks the rescue when the band is near-dead', () => {
+    // Heavier distortion drops the low band to ~1.1% — below the 1.5% floor.
+    // The comb is still present, but a near-dead band must not be credited.
+    const buf = _lowNoteWithDistortion(LOW_E_COMB, 0.5, 3.0);
+    const r = core.constraintCheckString(buf, SR, 0, 0,
+        'guitar', 6, GUITAR_6.offsets, 0, 50);
+    assert.ok(r.bandEnergy < 0.015, `bandEnergy ${r.bandEnergy.toFixed(4)} must be below the floor for this test`);
+    assert.equal(r.hit, false, 'below the silence floor the comb rescue must not fire');
+});
+
+test('lowEnergyRescue: only low notes (≤140Hz) are eligible — a diluted higher note is not rescued', () => {
+    // D string open = 146.83 Hz (> 140). Its comb, diluted into the rescue
+    // energy window, must still miss: the rescue is gated to the low blind spot
+    // so it never loosens detection for mid/high guitar notes.
+    const dComb = [146.83, 293.66, 440.49]; // within string-2 [132,645] band
+    const buf = _lowNoteWithDistortion(dComb, 0.5, 2.0);
+    const r = core.constraintCheckString(buf, SR, /*string*/ 2, 0,
+        'guitar', 6, GUITAR_6.offsets, 0, 50);
+    assert.ok(r.bandEnergy < 0.03 && r.bandEnergy >= 0.015,
+        `bandEnergy ${r.bandEnergy.toFixed(4)} should sit in the rescue window, so only the ≤140Hz gate can be what rejects it`);
+    assert.equal(r.hit, false, 'a >140Hz note must not be rescued even when its band lands in the rescue window');
+});
+
+test('lowEnergyRescue: a distorted E5 power chord (both strings diluted) is credited', () => {
+    // Integration: E5 = low E (E2) + A-string fret 2 (B2 123.47). Both strings'
+    // fundamentals diluted below 3% by distortion, both combs present. Before
+    // the rescue this scored 0/2 (partial-chord miss); now both strings ring.
+    const buf = _lowNoteWithDistortion(
+        [82.41, 164.81, 247.22, 329.63, 123.47, 246.94, 370.41], 0.4, 2.0);
+    const chord = [{ s: 0, f: 0 }, { s: 1, f: 2 }];
+    const r = core.scoreChord(buf, SR, chord,
+        'guitar', 6, GUITAR_6.offsets, 0, /*pitchCheckCents*/ 50, /*minHitRatio*/ 0.6);
+    assert.ok(r.hitStrings >= 1, `expected at least one string rescued (got ${r.hitStrings})`);
+    assert.ok(r.isHit || r.voicingHit, 'a diluted low power chord with both combs present must not be a partial-chord miss');
+});
+
 test('scoreChord: harmonic flag bypasses pitch check so off-pitch in-band energy still hits', () => {
     // String 0 expected = E2 (82.41 Hz). A 305 Hz sine is in the band but
     // ~2266 cents sharp — a 50-cent pitch check rejects it. With hm:true
