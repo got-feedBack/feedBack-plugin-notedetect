@@ -14913,12 +14913,20 @@ function createNoteDetector(options = {}) {
     // enable() once at activation. Cheap — one getLoop read + a
     // boolean compare.
     function _drillSyncFromLoopState() {
-        const { loopA, loopB } = _drillCurrentLoop();
+        const loopState = _drillCurrentLoop();
+        const { loopA, loopB } = loopState;
         // Require finite numbers, not just non-null. A malformed return
         // (e.g. {}, undefined fields) would otherwise activate drill
         // mode and start mutating per-iteration counters against bogus
         // bounds.
-        const nowEnabled = Number.isFinite(loopA) && Number.isFinite(loopB);
+        // Newer hosts expose configured-but-armed bounds separately from an
+        // active loop. Keep older { loopA, loopB } hosts compatible by treating
+        // a missing active/state field as the historical active behavior.
+        const explicitlyArmed = loopState.active === false
+            || loopState.state === 'armed'
+            || loopState.state === 'partial'
+            || loopState.state === 'starting';
+        const nowEnabled = Number.isFinite(loopA) && Number.isFinite(loopB) && !explicitlyArmed;
         if (nowEnabled && !drillEnabled) {
             // Drill just (re)started. Treat re-activation after a
             // previously-cleared loop the same way as a mid-drill

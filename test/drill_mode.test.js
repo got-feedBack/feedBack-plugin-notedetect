@@ -99,6 +99,33 @@ test('drill counters are gated on slopsmith.getLoop() — no loop = no per-iter 
     det.destroy();
 });
 
+test('configured but inactive host loops do not activate drill mode', () => {
+    const core = loadDetectionCore();
+    const det = core.createNoteDetector();
+    det._bindDrillEvents();
+
+    const inactiveLoops = [
+        { loopA: 10, loopB: 20, active: false },
+        { loopA: 10, loopB: 20, state: 'armed' },
+        { loopA: 10, loopB: 20, state: 'partial' },
+        { loopA: 10, loopB: 20, state: 'starting' },
+    ];
+    for (const loopState of inactiveLoops) {
+        core.slopsmith._loop = loopState;
+        det._drillSyncFromLoopState();
+        assert.equal(
+            det.getDrillStats().active,
+            false,
+            `${loopState.state || 'active=false'} must not activate drill mode`,
+        );
+    }
+
+    core.slopsmith._loop = { loopA: 10, loopB: 20, active: true, state: 'active' };
+    det._drillSyncFromLoopState();
+    assert.equal(det.getDrillStats().active, true, 'an explicitly active loop activates drill mode');
+    det.destroy();
+});
+
 test('song:loaded clears the iteration history (new song = new passage)', () => {
     const core = loadDetectionCore();
     const det = core.createNoteDetector();
