@@ -316,7 +316,7 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // exact build that produced it. The script tag has no `import`/`fetch`
 // hook to read package.json at load time, so this is the single
 // hand-maintained constant the diagnostic path keys off of.
-const _ND_VERSION = '1.32.0';
+const _ND_VERSION = '1.32.1';
 
 // Bleed-rescue tuning for the low-bass blind spot. A bass DI's fundamental is
 // weaker than its 2nd harmonic and an open string / neighbour often rings the
@@ -2940,6 +2940,27 @@ function createNoteDetector(options = {}) {
     let currentSection = null;
     const noteResults = new Map(); // key -> judgment object
 
+    // Notes missed on the LAST completed play of a song, kept ACROSS the
+    // per-play noteResults reset so the next play/loop marks them on the highway
+    // as they approach — the persistent "you missed THIS last time" spatial
+    // signal (drives BOTH renderers via the note-state provider; NOT suppressed
+    // during a drill the way drawOverlay is). Filename-gated so song A's misses
+    // never show on song B; a mark self-clears once that note is hit again this
+    // play. `keys` are noteResults keys ("<chartTime>_<s>_<f>").
+    let _prevPlayMisses = { filename: null, keys: new Set() };
+    function _ndSnapshotPlayMisses() {
+        // Only snapshot a REAL attempt (something was judged). A false-start or
+        // detect-off pass (0 judgments) must keep the prior play's marks rather
+        // than wipe them; a genuinely clean play (hits>0, no misses) correctly
+        // clears them (empty set).
+        if (hits + misses <= 0) return;
+        const keys = new Set();
+        for (const [k, j] of noteResults.entries()) {
+            if (j && !j.hit) keys.add(k);
+        }
+        _prevPlayMisses = { filename: (_ndShared && _ndShared.currentFilename) || null, keys };
+    }
+
     // Position-aware score ledger. One compact entry per COUNTED judgment,
     // keyed by the SAME key as noteResults (so the two prune in lockstep) but
     // never garbage-collected — noteResults is pruned for memory (see the gc
@@ -5223,6 +5244,9 @@ function createNoteDetector(options = {}) {
     // Short on purpose — the slide-down miss marker (drawOverlay) carries
     // the longer-lived feedback; the gem wash is just an instant cue.
     const NOTE_MISS_GEM_TTL = 0.6;
+    // Missed-note gem color. Deliberately PURPLE, not red — red collides with
+    // the E string (#ff3c3c) and made a missed E unreadable.
+    const NOTE_MISS_COLOR = '#c04bff';
     // Grace (ms) after an on-pitch detection during which a sustained
     // note still counts as actively held — smooths render-vs-pitch frame
     // rate mismatch (see _susActiveUntil).
@@ -5279,6 +5303,18 @@ function createNoteDetector(options = {}) {
         if (!enabled || !note || !Number.isFinite(chartTime)) return null;
         const key = noteKey(note, chartTime);
         const j = noteResults.get(key);
+        // PERSISTENT "you missed this last time": a note flagged missed on the
+        // last completed play/loop lights the GEM red and STAYS red the whole
+        // way down until it's hit again this play (self-clears the moment j.hit
+        // flips true). Filename-gated. This is the readable spatial signal that
+        // replaces the fleeting sub-second wash — checked BEFORE the transient
+        // logic so it wins while the note is still un-hit this pass.
+        if ((!j || !j.hit)
+                && _prevPlayMisses.keys.size
+                && _prevPlayMisses.keys.has(key)
+                && _prevPlayMisses.filename === ((_ndShared && _ndShared.currentFilename) || null)) {
+            return { state: 'miss', alpha: 1, color: NOTE_MISS_COLOR };
+        }
         if (!j) {
             // No verdict yet — provisional live glow so a struck note (esp. a
             // long sustain whose engine verdict lands after the gem is culled)
@@ -5354,7 +5390,7 @@ function createNoteDetector(options = {}) {
         // Missed (timing window expired, or matched-but-not-clean).
         const age = songT - dispAnchor;
         if (age < 0 || age >= NOTE_MISS_GEM_TTL) return null;
-        return { state: 'miss', alpha: 1 - age / NOTE_MISS_GEM_TTL };
+        return { state: 'miss', alpha: 1 - age / NOTE_MISS_GEM_TTL, color: NOTE_MISS_COLOR };
     }
 
     // Is the live monophonic detection on target for `note`? Maintains a
@@ -17229,6 +17265,11 @@ function createNoteDetector(options = {}) {
     function showSummary(opts) {
         if (!_summaryWorthy()) return false;
         const total = hits + misses;
+        // Remember this play's misses so they mark the highway on the NEXT
+        // play/loop of this song (persistent red "you missed this" gems). Done
+        // here — end of play, noteResults still intact, filename still this
+        // song — before the next playSong's resetScoring() clears them.
+        _ndSnapshotPlayMisses();
 
         const existing = instanceRoot.querySelector('.nd-summary-overlay');
         if (existing) { existing.remove(); _ndAutoExitRelease = null; }
