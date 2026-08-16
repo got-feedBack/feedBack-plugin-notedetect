@@ -316,7 +316,7 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // exact build that produced it. The script tag has no `import`/`fetch`
 // hook to read package.json at load time, so this is the single
 // hand-maintained constant the diagnostic path keys off of.
-const _ND_VERSION = '1.32.0';
+const _ND_VERSION = '1.32.1';
 
 // Bleed-rescue tuning for the low-bass blind spot. A bass DI's fundamental is
 // weaker than its 2nd harmonic and an open string / neighbour often rings the
@@ -17244,12 +17244,25 @@ function createNoteDetector(options = {}) {
         const _summaryHw = resolveHw();
         const _summaryInfo = (_summaryHw && _summaryHw.getSongInfo)
             ? (_summaryHw.getSongInfo() || {}) : {};
-        const songTitle = _summaryInfo.title ? String(_summaryInfo.title) : '';
-        const songArtist = _summaryInfo.artist ? String(_summaryInfo.artist) : '';
-        const instrument = _ndInstrumentLabel(_summaryInfo.arrangement);
-        const arrangementIndex = Number.isFinite(_summaryInfo.arrangement_index)
-            ? _summaryInfo.arrangement_index : undefined;
-        const retryFilename = _ndShared.currentFilename || '';
+        // Pin the Retry/Practice target to the ACTUALLY-LOADED song. Reading the
+        // filename from _ndShared.currentFilename (a process-global written the
+        // instant ANY playSong is CALLED — queue advance, autoplay, and
+        // note_detect's own internal return-to-previous plays all overwrite it,
+        // so it LEADS/jumps) while reading the arrangement from getSongInfo()
+        // (which LAGS a WS frame) let the two disagree by one—or two—songs, so
+        // Retry/Practice jumped to "the song before last". window.feedBack
+        // .currentSong is set atomically from the WS song_info (filename +
+        // arrangement together, only on a real load) — one source, one song.
+        const _cur = (typeof window !== 'undefined' && window.feedBack && window.feedBack.currentSong) || {};
+        const songTitle = _cur.title ? String(_cur.title)
+            : (_summaryInfo.title ? String(_summaryInfo.title) : '');
+        const songArtist = _cur.artist ? String(_cur.artist)
+            : (_summaryInfo.artist ? String(_summaryInfo.artist) : '');
+        const instrument = _ndInstrumentLabel(_cur.arrangement || _summaryInfo.arrangement);
+        const arrangementIndex = Number.isFinite(_cur.arrangementIndex) ? _cur.arrangementIndex
+            : (Number.isFinite(_cur.arrangement_index) ? _cur.arrangement_index
+                : (Number.isFinite(_summaryInfo.arrangement_index) ? _summaryInfo.arrangement_index : undefined));
+        const retryFilename = _cur.filename || _ndShared.currentFilename || '';
         const canRetry = !!retryFilename && typeof window.playSong === 'function';
         const artUrl = _ndSongArtUrl(retryFilename);
         // "Beat your best" delta: read the stored best for THIS song+arrangement
