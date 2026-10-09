@@ -646,6 +646,34 @@ function _ndEngineCapoPayload(payload) {
 // _ndFinalizeChordVerdict.
 const _ND_ENGINE_STAMP_SLACK_S = 0.1;
 
+// Whole-chart reference-pitch shift (cents) → the part note detection applies.
+// The host's effective `centOffset` (`highway.getCentOffset()`: a chart-
+// transform provider's value, else the chart's own `<centOffset>`) says the
+// audio sits N cents off the chart's nominal pitch — a retune/pitch-shift
+// transform, a true-tuned A443 recording (+11.8), a song shifted to E standard.
+// Whole octaves are dropped: matching is already octave-folded and the
+// per-arrangement base tables already place bass in its own octave, so the
+// common extended-range-bass `-1200` must keep scoring exactly as before. The
+// remainder lands in (-600, 600] and is folded into the per-string offsets
+// (as fractional semitones) by _syncChartStateFromHw, so it reaches every
+// expected MIDI / band range through _ndMidiFromStringFret unchanged.
+function _ndRefShiftCents(centOffset) {
+    const c = Number(centOffset);
+    if (!Number.isFinite(c)) return 0;
+    const r = c - 1200 * Math.round(c / 1200);
+    return Math.abs(r) < 1e-6 ? 0 : r;
+}
+
+// The desktop engine's chart/scoreChord contexts read tuning offsets as
+// Int32 (truncating), so a fractional reference shift is rounded to the
+// nearest semitone at the bridge boundary — a whole-semitone retune still
+// reaches the engine exactly; a sub-semitone residue (e.g. A443) stays a
+// JS-path refinement that sits inside the engine's pitch tolerance anyway.
+function _ndEngineOffsets(offsets) {
+    if (!Array.isArray(offsets)) return offsets;
+    return offsets.map(o => Math.round(Number(o) || 0));
+}
+
 function _ndClassifyTiming(timingErrorMs, timingThresholdMs, lateGraceMs) {
     if (!Number.isFinite(timingErrorMs)) return null;
     const grace = Number.isFinite(lateGraceMs) && lateGraceMs > 0 ? lateGraceMs : 0;
@@ -3426,6 +3454,9 @@ function createNoteDetector(options = {}) {
     let tuningOffsets = [0, 0, 0, 0, 0, 0];
     let capo = 0;
     let currentStringCount = 6; // kept in sync with tuningOffsets.length
+    // Effective-tuning inputs the fields above were last synced from (see
+    // _ndResyncIfTuningChanged); null = never synced.
+    let _ndSyncedTuningKey = null;
 
     // Audio buffers
     let accumBuffer = new Float32Array(0);
@@ -3580,6 +3611,7 @@ function createNoteDetector(options = {}) {
     function _ndBridgeScoreChord(ctx) {
         const a = _ndBridgeAudio(); if (!a) return Promise.resolve(null);
         ctx = _ndEngineCapoPayload(ctx);
+        if (ctx && Array.isArray(ctx.offsets)) ctx = { ...ctx, offsets: _ndEngineOffsets(ctx.offsets) };
         if (sourceId != null && typeof a.scoreSourceChord === 'function')
             return a.scoreSourceChord(sourceId, ctx);
         if (sourceId == null && typeof a.scoreChord === 'function')
@@ -3595,6 +3627,9 @@ function createNoteDetector(options = {}) {
     function _ndBridgeSetChart(chart) {
         const a = _ndBridgeAudio(); if (!a) return Promise.resolve(null);
         chart = _ndEngineCapoPayload(chart);
+        if (chart && Array.isArray(chart.tuningOffsets)) {
+            chart = { ...chart, tuningOffsets: _ndEngineOffsets(chart.tuningOffsets) };
+        }
         if (sourceId != null && typeof a.setSourceChart === 'function')
             return a.setSourceChart(sourceId, chart);
         if (sourceId == null && typeof a.setChart === 'function')
@@ -4236,6 +4271,10 @@ function createNoteDetector(options = {}) {
                                 // song:loaded (and can switch mid-session);
                                 // re-push whenever the live chart diverges
                                 // from what the engine currently holds.
+                                // A live retune restage changes the
+                                // effective tuning, which is in the
+                                // signature, so it re-pushes here too.
+                                _ndResyncIfTuningChanged();
                                 if (_ndChartSignature() !== _ndVerifierChartSig) {
                                     await _ndPushChartToBridge();
                                     if (!enabled || gen !== sessionGen) return;
@@ -5114,6 +5153,9 @@ function createNoteDetector(options = {}) {
 
     // ── Frame processing ──────────────────────────────────────────────
     async function processFrame(buffer) {
+        // Follow a mid-song chart-transform restage (live retune) before
+        // mapping any (string, fret) to an expected pitch this frame.
+        _ndResyncIfTuningChanged();
         // Append to the rolling raw-audio buffer for the bass miss rescue
         // (checkMisses). Bass only — guitar's higher fundamentals resolve in
         // the short window, so it doesn't need (or pay for) this.
@@ -13713,10 +13755,26 @@ function createNoteDetector(options = {}) {
         tuningOffsets = [0, 0, 0, 0, 0, 0];
         capo = 0;
         const info = (hw && hw.getSongInfo) ? hw.getSongInfo() : null;
+        const eff = _ndReadEffectiveTuning();
+        _ndSyncedTuningKey = eff;
         if (!info) return;
         if (info.arrangement) currentArrangement = _ndArrangementKindFromName(info.arrangement);
-        if (Array.isArray(info.tuning)) tuningOffsets = info.tuning;
-        if (Number.isFinite(info.capo)) capo = info.capo;
+        // Tuning / capo / reference pitch come from the host's EFFECTIVE
+        // getters, not getSongInfo(): getSongInfo() keeps the original chart
+        // metadata, while getNotes()/getChords() (what we score) already carry
+        // any chart-transform provider's output. Reading the original tuning
+        // against transformed frets made a retuned / converted-to-E-standard
+        // chart score against its old pitches. Hosts without the getters
+        // (pre-chart-transform) fall back to song_info.
+        const tuning = Array.isArray(eff.tuning) ? eff.tuning : info.tuning;
+        if (Array.isArray(tuning)) {
+            const shift = _ndRefShiftCents(eff.centOffset !== undefined ? eff.centOffset : info.centOffset);
+            tuningOffsets = shift
+                ? tuning.map(o => (Number(o) || 0) + shift / 100)
+                : tuning;
+        }
+        const effCapo = eff.capo !== undefined ? eff.capo : info.capo;
+        if (Number.isFinite(effCapo)) capo = effCapo;
 
         // String-count resolution, in precedence order:
         //   1. hw.getStringCount() — host's authoritative count. Asked
@@ -13741,7 +13799,7 @@ function createNoteDetector(options = {}) {
         if (Number.isFinite(hostStringCount)) {
             currentStringCount = hostStringCount;
         } else if (info.arrangement) {
-            const tuneLen = Array.isArray(info.tuning) ? info.tuning.length : null;
+            const tuneLen = Array.isArray(tuning) ? tuning.length : null;
             const consistent = currentArrangement === 'bass'
                 ? (tuneLen === 4 || tuneLen === 5)
                 : (tuneLen === 6 || tuneLen === 7 || tuneLen === 8);
@@ -13750,9 +13808,45 @@ function createNoteDetector(options = {}) {
             } else {
                 currentStringCount = currentArrangement === 'bass' ? 4 : 6;
             }
-        } else if (Array.isArray(info.tuning)) {
-            currentStringCount = info.tuning.length;
+        } else if (Array.isArray(tuning)) {
+            currentStringCount = tuning.length;
         }
+    }
+
+    // The host's effective tuning inputs, read raw (undefined when the host
+    // predates the chart-transform getters). Compared by identity in
+    // _ndResyncIfTuningChanged: the highway hands back the same array/number
+    // until a transform restages, so this is a few getter calls per tick.
+    function _ndReadEffectiveTuning() {
+        const read = (name) => {
+            if (!hw || typeof hw[name] !== 'function') return undefined;
+            try { return hw[name](); } catch (_) { return undefined; }
+        };
+        return {
+            tuning: read('getTuning'),
+            capo: read('getCapo'),
+            centOffset: read('getCentOffset'),
+        };
+    }
+    // A chart-transform provider can restage mid-song (select / clear /
+    // refresh — e.g. a live retune) without any song or arrangement event.
+    // Called from the detect tick so scoring follows the effective tuning
+    // within a frame; returns true when it resynced.
+    function _ndResyncIfTuningChanged() {
+        // Pre-chart-transform host: nothing can restage mid-song, and the
+        // song/arrangement events already cover every change.
+        if (!hw || (typeof hw.getTuning !== 'function'
+            && typeof hw.getCapo !== 'function'
+            && typeof hw.getCentOffset !== 'function')) return false;
+        const k = _ndSyncedTuningKey;
+        const now = _ndReadEffectiveTuning();
+        if (k && k.tuning === now.tuning && k.capo === now.capo
+            && (k.centOffset === now.centOffset
+                || (Number.isNaN(k.centOffset) && Number.isNaN(now.centOffset)))) {
+            return false;
+        }
+        _syncChartStateFromHw();
+        return true;
     }
 
     // ── Engine-side chart verification (desktop bridge) ───────────────────
@@ -13810,7 +13904,8 @@ function createNoteDetector(options = {}) {
         // value up live — without this the popup sliders are inert on the
         // engine-verifier path until the next song/arrangement change.
         return n + ':' + c + ':' + currentArrangement + ':' + currentStringCount
-            + ':' + capo + ':' + timingTolerance + ':' + pitchTolerance
+            + ':' + capo + ':' + tuningOffsets.slice(0, currentStringCount).join(',')
+            + ':' + timingTolerance + ':' + pitchTolerance
             + ':' + (fnv >>> 0);
     }
 
@@ -18646,6 +18741,7 @@ function createNoteDetector(options = {}) {
         _bindChartStateEvents: _chartStateBindEvents,
         _unbindChartStateEvents: _chartStateUnbindEvents,
         _syncChartStateFromHw: _syncChartStateFromHw,
+        _resyncIfTuningChanged: _ndResyncIfTuningChanged,
         // Auto-record test hooks — same rationale. Production binds from
         // enableImpl() / unbinds from destroy(); tests drive them without
         // the audio pipeline to assert the song:loaded auto-arm.
@@ -18690,6 +18786,9 @@ function createNoteDetector(options = {}) {
                 if (Number.isFinite(ctx.stringCount))   currentStringCount = ctx.stringCount;
                 if (Array.isArray(ctx.tuningOffsets))   tuningOffsets = ctx.tuningOffsets.slice();
                 if (Number.isFinite(ctx.capo))          capo = ctx.capo;
+                // An injected context is authoritative — don't let the
+                // per-tick effective-tuning resync overwrite it.
+                _ndSyncedTuningKey = _ndReadEffectiveTuning();
             },
             setSettings: (s) => {
                 s = s || {};

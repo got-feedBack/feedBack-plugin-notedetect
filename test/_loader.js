@@ -259,6 +259,13 @@ function loadDetectionCore({ sandboxBeforeRun } = {}) {
         midiToStringFret: midiToStringFretWrapped,
         resolveDisplayFingering: resolveDisplayFingeringWrapped,
         nearestOctaveCents: sandbox._ndNearestOctaveCents,
+        // Effective-tuning helpers (chart-transform / centOffset follow).
+        rawMidiFromStringFret: sandbox._ndMidiFromStringFret,
+        refShiftCents: sandbox._ndRefShiftCents,
+        engineOffsets: (offsets) => {
+            const r = sandbox._ndEngineOffsets(offsets);
+            return Array.isArray(r) ? Array.from(r) : r;
+        },
         stringBandHz: sandbox._ndStringBandHz,
         bandEnergy: sandbox._ndBandEnergy,
         constraintCheckString: sandbox._ndConstraintCheckString,
