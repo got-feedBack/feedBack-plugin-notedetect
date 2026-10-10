@@ -133,7 +133,12 @@ test('setVerifyTarget ctx: scoreChord is called with the caller tuning, not the 
     const req = env.scoreChordRequests[env.scoreChordRequests.length - 1];
     assert.equal(req.arrangement, 'bass', 'scoreChord arrangement must come from the ctx');
     assert.equal(req.stringCount, 5, 'scoreChord stringCount must come from the ctx');
-    assert.equal(req.capo, 2, 'scoreChord capo must come from the ctx');
+    // The ctx capo reaches the engine already applied: capo charts write
+    // fretted notes from the nut, so the bridge hands the engine capo 0 and
+    // moves only open notes to the capo fret (see _ndEngineCapoPayload).
+    // The target here is fretted, so its fret passes through unchanged.
+    assert.equal(req.capo, 0, 'the ctx capo is folded into the frets for the engine');
+    assert.deepEqual(Array.from(req.notes, n => n.f), [3], 'a fretted target keeps its fret');
     assert.deepEqual([...req.offsets], [-2, 0, 0, 0, 0], 'scoreChord offsets must come from the ctx');
     assert.ok(req.harmonicVerify === true && req.bypassMl === true,
         'still the harmonic-comb DSP verify path');

@@ -316,7 +316,7 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // exact build that produced it. The script tag has no `import`/`fetch`
 // hook to read package.json at load time, so this is the single
 // hand-maintained constant the diagnostic path keys off of.
-const _ND_VERSION = '1.32.0';
+const _ND_VERSION = '1.33.0';
 
 // Bleed-rescue tuning for the low-bass blind spot. A bass DI's fundamental is
 // weaker than its 2nd harmonic and an open string / neighbour often rings the
@@ -514,7 +514,8 @@ function _ndVerifySigFor(arrangement, stringCount, offsets, capo) {
 //   • `tuning` / `offsets`: per-string semitone OFFSETS from standard tuning
 //     (the chart convention, matching the instance's tuningOffsets). `offsets`
 //     is also accepted so getVerifyContext() output round-trips back in. This
-//     path honors ctx.capo.
+//     path honors ctx.capo, with the chart's fret convention (fretted notes
+//     count from the nut, fret 0 sounds at the capo; see _ndAbsoluteFret).
 // Either array is read BY STRING INDEX — a non-finite entry maps to 0 in place,
 // never reindexed, so one bad string can't shift the others' pitch mapping.
 //
@@ -607,10 +608,35 @@ function _ndMidiToName(midi) {
     return _ND_PITCH_NAMES[pc] + octave;
 }
 
+// Capo charts follow the Rocksmith convention: a FRETTED note's fret is
+// absolute (counted from the nut, so it already includes the capo) and only
+// fret 0 means "open", which with a capo on is the capo fret. A capo-4 E
+// chord is charted A7 D6 G0 B5, not A3 D2 G0 B1. Adding the capo to every
+// fret put each fretted note `capo` semitones sharp, so capo charts barely
+// scored. Returns the fret counted from the nut.
+function _ndAbsoluteFret(fret, capo) {
+    return fret === 0 && capo > 0 ? capo : fret;
+}
+
 function _ndMidiFromStringFret(string, fret, arrangement, stringCount, offsets, capo) {
     const base = _ndStandardMidiFor(arrangement, stringCount);
     const offset = offsets && offsets[string] !== undefined ? offsets[string] : 0;
-    return base[string] + offset + (capo || 0) + fret;
+    return base[string] + offset + _ndAbsoluteFret(fret, capo);
+}
+
+// The desktop engine maps (string, fret) to pitch as open + capo + fret and
+// has no switch for the chart convention above. So hand it capo 0 and
+// rewrite open (fret 0) notes to the capo fret: the engine then expects the
+// same pitches as _ndMidiFromStringFret. Used by both bridge funnels
+// (setChart and scoreChord payloads both carry `capo` + `notes[].f`).
+// Returns the payload unchanged when there's no capo.
+function _ndEngineCapoPayload(payload) {
+    if (!payload || !(payload.capo > 0)) return payload;
+    const capo = payload.capo;
+    const notes = Array.isArray(payload.notes)
+        ? payload.notes.map(n => (n && n.f === 0 ? { ...n, f: capo } : n))
+        : payload.notes;
+    return { ...payload, capo: 0, notes };
 }
 
 function _ndClassifyTiming(timingErrorMs, timingThresholdMs, lateGraceMs) {
@@ -1406,7 +1432,9 @@ function _ndMidiToStringFret(midiNote, arrangement, stringCount, offsets, capo) 
         if (dist < bestDist) {
             bestDist = dist;
             bestString = s;
-            bestFret = fret;
+            // `fret` counts from the capo here; report it from the nut,
+            // the way the chart writes it (see _ndAbsoluteFret).
+            bestFret = fret > 0 && capo > 0 ? fret + capo : fret;
         }
     }
     return { string: bestString, fret: bestFret };
@@ -3526,6 +3554,7 @@ function createNoteDetector(options = {}) {
     }
     function _ndBridgeScoreChord(ctx) {
         const a = _ndBridgeAudio(); if (!a) return Promise.resolve(null);
+        ctx = _ndEngineCapoPayload(ctx);
         if (sourceId != null && typeof a.scoreSourceChord === 'function')
             return a.scoreSourceChord(sourceId, ctx);
         if (sourceId == null && typeof a.scoreChord === 'function')
@@ -3540,6 +3569,7 @@ function createNoteDetector(options = {}) {
     }
     function _ndBridgeSetChart(chart) {
         const a = _ndBridgeAudio(); if (!a) return Promise.resolve(null);
+        chart = _ndEngineCapoPayload(chart);
         if (sourceId != null && typeof a.setSourceChart === 'function')
             return a.setSourceChart(sourceId, chart);
         if (sourceId == null && typeof a.setChart === 'function')
