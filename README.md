@@ -125,6 +125,18 @@ Field reference for the per-note events:
 | `hit` | `true` only when timing and pitch are both clean | all events (`false` for misses) |
 | `timingState` / `pitchState` | Independent diagnostic axes: `OK`, `EARLY`, `LATE`, `SHARP`, or `FLAT` | clean hits and matched diagnostic misses; `null` for pure misses |
 | `timingError` / `pitchError` | Signed timing error in milliseconds and signed pitch error in cents; `pitchError` is octave-folded to the nearest octave (so it is not necessarily equal to `(detectedMidi - expectedMidi) * 100`) | clean hits and matched diagnostic misses; `null` for pure misses |
+| `chord` / `notes` | `true` for a chord-level judgment; `notes` lists the chord's `{ s, f }` (`note` is then the lead string) | all events |
+| `hitStrings` / `totalStrings` / `score` | How many of the chord's strings rang, out of how many, and the ratio the Chord Leniency setting is compared with | chord judgments where the scorer ran |
+| `key` | Stable id of the judged chart note, the same key the highway's `getNoteState` hands back as `popKey`: `"<time>_<string>_<fret>"` for a single note (e.g. `"12.345_2_7"`), `"<time>_chord"` for a chord | all events (v1.33+) |
+| `strings` | Per-string verdicts, `[{ s, f, hit, centsError, snr?, detectedAt? }]` (`centsError` rounded cents or `null`; `snr` and `detectedAt` from the desktop engine). For a partial chord this says which strings rang. A missed browser-path chord reports the best frame the scorer saw in its window | chord judgments; single notes on the desktop engine path. `null` when no per-string measurement exists |
+| `techniques` | Named techniques of the chart note: `bend`, `slide`, `harmonic`, `pinchHarmonic`, `hammerOn`, `pullOff`, `tap`, `palmMute`, `mute`, `fretHandMute`, `vibrato`, `tremolo`, `accent`, `slap`, `pluck`. `[]` for a plain note. The raw chart note stays in `chartNote` | all chart judgments (v1.33+); `null` for external verdicts |
+| `latencyMs` / `avOffsetMs` | The input-latency compensation and A/V offset in effect when the note was judged. `timingError` already has both applied; add `latencyMs` back to get the uncompensated offset | all events (v1.33+) |
+| `detector` | Which path judged it: `desktop-engine-verifier`, a desktop detector label, `web-yin` / `web-hps` / `web-crepe`, or `external` | all events (v1.33+) |
+| `section` | Name of the chart section the note sits in (by chart time), or `null` | all events (v1.33+) |
+| `counted` / `points` / `multiplier` / `streak` | Whether the judgment counted toward the score, the points it earned, and the multiplier and streak after it | all events (v1.33+) |
+| `isDefault` | `true` for the main player's detector, `false` for a splitscreen panel's | all events (v1.33+) |
+
+Fields are additive: existing ones keep their meaning, and new ones may appear. Timing class for a scorecard is `timingState` (`OK` / `EARLY` / `LATE`) with `timingError` as the signed offset.
 
 Example — log every hit:
 
@@ -132,6 +144,21 @@ Example — log every hit:
 window.addEventListener('notedetect:hit', (e) => {
     const { note, time, confidence } = e.detail;
     console.log(`hit ${note.s}/${note.f} at t=${time.toFixed(2)}s (conf ${confidence.toFixed(2)})`);
+});
+```
+
+Example — a per-string tally for partial chords:
+
+```js
+const perString = {};
+window.addEventListener('notedetect:miss', (e) => {
+    const j = e.detail;
+    if (!j.counted || !j.isDefault || !j.chord || !j.strings) return;
+    for (const st of j.strings) {
+        const k = `${st.s}`;
+        perString[k] = perString[k] || { rang: 0, missed: 0 };
+        perString[k][st.hit ? 'rang' : 'missed']++;
+    }
 });
 ```
 
