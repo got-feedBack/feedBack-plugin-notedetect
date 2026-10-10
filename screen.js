@@ -5891,7 +5891,7 @@ function createNoteDetector(options = {}) {
                 if (_ndIsStreakMilestone(streak)) {
                     dispatchFx({ fxType: 'milestone', streak, mult: multiplier });
                 }
-                updateSectionStat('hit');
+                updateSectionStat('hit', judgment.noteTime);
                 // A hit breaks the contiguous-miss run the auto-drill watches.
                 _autoDrillMissStreak = 0;
             } else {
@@ -5904,7 +5904,7 @@ function createNoteDetector(options = {}) {
                     dispatchFx({ fxType: 'streakBreak', lostStreak, prevMult: multiplier });
                 }
                 multiplier = 1;
-                updateSectionStat('miss');
+                updateSectionStat('miss', judgment.noteTime);
                 // Grow the contiguous-miss run and, at the threshold, drop into a
                 // drill on the fluffed passage (auto-drill). Track the run's
                 // chart-time span so the drill targets exactly those notes.
@@ -6635,7 +6635,13 @@ function createNoteDetector(options = {}) {
         // (detected:false verdicts, drained by _ndDrainEngineVerdicts), so
         // this renderer-side retire scan is superseded. The browser path —
         // and any desktop session on a downlevel addon — still relies on it.
-        if (_ndUsingEngineVerifier) return;
+        // The section tracker below still has to advance, though, or the
+        // per-section stats stay empty on desktop.
+        if (_ndUsingEngineVerifier) {
+            const avOffsetSec = (hw.getAvOffset ? hw.getAvOffset() / 1000 : 0);
+            _ndTrackSection(hw.getTime() + avOffsetSec - latencyOffset);
+            return;
+        }
         // Reset the per-tick rescue-FFT budget (see _RESCUE_WINDOWS_PER_TICK).
         // checkNote spends against this; once exhausted, further conceded bass
         // misses this tick retire as plain misses instead of running FFTs.
@@ -6889,27 +6895,44 @@ function createNoteDetector(options = {}) {
             }
         }
 
+        _ndTrackSection(t);
+    }
+
+    // Name of the chart section containing chart time `t` (the last one that
+    // starts at or before it), or null when the chart has no sections.
+    function _ndSectionNameAt(t) {
         const sections = hw.getSections ? hw.getSections() : null;
-        if (sections) {
-            let current = null;
-            for (const sec of sections) {
-                if (sec.time <= t) current = sec.name;
-                else break;
-            }
-            if (current && current !== currentSection) {
-                currentSection = current;
-                if (!sectionStats.find(s => s.name === current)) {
-                    sectionStats.push({ name: current, hits: 0, misses: 0 });
-                }
+        if (!sections || !Number.isFinite(t)) return null;
+        let current = null;
+        for (const sec of sections) {
+            if (sec.time <= t) current = sec.name;
+            else break;
+        }
+        return current;
+    }
+
+    // Advance currentSection to the playhead's section, opening its row in
+    // sectionStats so a section the player passes through still shows up.
+    function _ndTrackSection(t) {
+        const current = _ndSectionNameAt(t);
+        if (current && current !== currentSection) {
+            currentSection = current;
+            if (!sectionStats.find(s => s.name === current)) {
+                sectionStats.push({ name: current, hits: 0, misses: 0 });
             }
         }
     }
 
-    function updateSectionStat(type) {
-        if (!currentSection) return;
-        let sec = sectionStats.find(s => s.name === currentSection);
+    // Bin a judgment by the section its NOTE sits in when we know the note's
+    // chart time. Engine verdicts land after a note's window closes, often once
+    // the playhead has crossed into the next section; the playhead's section
+    // (currentSection) is only the fallback.
+    function updateSectionStat(type, noteTime) {
+        const name = _ndSectionNameAt(noteTime) || currentSection;
+        if (!name) return;
+        let sec = sectionStats.find(s => s.name === name);
         if (!sec) {
-            sec = { name: currentSection, hits: 0, misses: 0 };
+            sec = { name, hits: 0, misses: 0 };
             sectionStats.push(sec);
         }
         if (type === 'hit') sec.hits++;
