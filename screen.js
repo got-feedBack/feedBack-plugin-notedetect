@@ -316,7 +316,7 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // exact build that produced it. The script tag has no `import`/`fetch`
 // hook to read package.json at load time, so this is the single
 // hand-maintained constant the diagnostic path keys off of.
-const _ND_VERSION = '1.32.0';
+const _ND_VERSION = '1.33.0';
 
 // Bleed-rescue tuning for the low-bass blind spot. A bass DI's fundamental is
 // weaker than its 2nd harmonic and an open string / neighbour often rings the
@@ -612,6 +612,13 @@ function _ndMidiFromStringFret(string, fret, arrangement, stringCount, offsets, 
     const offset = offsets && offsets[string] !== undefined ? offsets[string] : 0;
     return base[string] + offset + (capo || 0) + fret;
 }
+
+// How far before a chord's timing window the engine verifier's detect stamp
+// can land and still mean "verified as the window opened": the renderer
+// pushes the playhead the engine stamps with once per detect tick, so a
+// stamp can trail the engine's own clock by about a poll. See
+// _ndFinalizeChordVerdict.
+const _ND_ENGINE_STAMP_SLACK_S = 0.1;
 
 function _ndClassifyTiming(timingErrorMs, timingThresholdMs, lateGraceMs) {
     if (!Number.isFinite(timingErrorMs)) return null;
@@ -6529,6 +6536,15 @@ function createNoteDetector(options = {}) {
                     // after the window has fully elapsed.
                     continue;
                 }
+
+                // A strum that scored but landed EARLY (inside the match
+                // window, before the chord hit edge) is usually the previous
+                // chord of the same shape still ringing in a fast run. Don't
+                // lock it in as a miss: a later frame in the window can still
+                // hit, and checkMisses() retires the chord as before if none
+                // does. Its diagnostics aren't cached either, so an early
+                // ring can't pin the voicing rescue's judgedAt to EARLY.
+                if (!chordJudgment.hit && chordJudgment.timingState === 'EARLY') continue;
 
                 // Chord cleared. Mark the chord-level key 'hit' so the
                 // miss aggregator in checkMisses() treats it as a single
@@ -14127,9 +14143,27 @@ function createNoteDetector(options = {}) {
             const v = verdictMap.get(id);
             if (v && v.detected) {
                 hitStrings++;
-                if (detectedTime === null) detectedTime = v.detectedSongTime;
+                // Stamp the chord with the member detected closest to the
+                // chart time, not the first one listed. In a fast run of one
+                // shape a string still ringing from the previous chord is
+                // "detected" as soon as this chord's window opens, while the
+                // others land on the strum.
+                const ts = v.detectedSongTime;
+                if (Number.isFinite(ts) && (detectedTime === null
+                    || Math.abs(ts - grp.t) < Math.abs(detectedTime - grp.t))) {
+                    detectedTime = ts;
+                }
                 if (bestCents === null && Number.isFinite(v.centsError)) bestCents = v.centsError;
             }
+        }
+        // The engine only verifies a chord inside its timing window, so a
+        // stamp just before the early hit edge means "present as the window
+        // opened" (the same shape still ringing), stamped by a playhead that
+        // can lag a poll behind. Counted as on time instead of EARLY by that
+        // jitter. A stamp further out than the slack is still EARLY.
+        if (detectedTime !== null && detectedTime < grp.t - chordTimingHitThreshold
+            && detectedTime >= grp.t - timingTolerance - _ND_ENGINE_STAMP_SLACK_S) {
+            detectedTime = grp.t - chordTimingHitThreshold;
         }
         const totalStrings = grp.memberIds.length;
         const score = totalStrings > 0 ? hitStrings / totalStrings : 0;
