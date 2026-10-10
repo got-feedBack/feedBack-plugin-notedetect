@@ -2143,6 +2143,23 @@ function _ndKeysToReopenOnSeek(lastT, t, tolerance, keys) {
     return out;
 }
 
+// Technique-flag readers. Core's highway wire format (lib/song.py
+// note_to_wire) sends `sl` / `slu` as the slide-to fret with -1 meaning
+// "no slide", and the bend amount as `bn` (0 = none). A bare `!!cn.sl` reads
+// that -1 as true, so EVERY note looked like a slide and got the widened pitch
+// window. These accept both the wire numbers and the booleans note_detect's
+// own payloads carry (`{ b: true, sl: true }` — calibration lab, verify
+// targets, the engine chart), so they're safe on either shape.
+function _ndHasSlide(n) {
+    if (!n) return false;
+    const on = (v) => v === true || (typeof v === 'number' && v >= 0);
+    return on(n.sl) || on(n.slu);
+}
+function _ndHasBend(n) {
+    if (!n) return false;
+    return !!(n.b || (typeof n.bn === 'number' ? n.bn > 0 : n.bn));
+}
+
 // Score a chord by checking each of its constituent notes against their
 // respective string frequency bands. Returns { score, hitStrings, totalStrings }.
 //
@@ -2150,7 +2167,8 @@ function _ndKeysToReopenOnSeek(lastT, t, tolerance, keys) {
 // minHitRatio — fraction of strings that must ring for the chord to count as a hit.
 //
 // Each `chordNotes` entry may carry abbreviated technique flags from the chart
-// note data (`cn.ho`, `cn.po`, `cn.b`, `cn.sl`, `cn.hm`), used to adjust
+// note data (`cn.ho`, `cn.po`, bend, slide, `cn.hm` — bend/slide read via
+// _ndHasBend/_ndHasSlide so wire-format notes work), used to adjust
 // per-string thresholds:
 //   - ho/po (hammer-on / pull-off): lower energyThreshold (no fresh pick attack)
 //   - b/sl (bend / slide): widen pitchCheckCents (pitch is in motion)
@@ -2179,7 +2197,7 @@ function _ndScoreChord(buffer, sampleRate, chordNotes, arrangement, stringCount,
             // Hammer-on / pull-off: no pick attack, energy will be lower
             energyThreshold = 0.015;
         }
-        if (cn.b || cn.sl) {
+        if (_ndHasBend(cn) || _ndHasSlide(cn)) {
             // Bend / slide: pitch is moving, widen the pitch window
             cents = Math.max(cents, 100);
         }
@@ -5745,8 +5763,8 @@ function createNoteDetector(options = {}) {
     function _diagTechFlags(n) {
         if (!n) return null;
         const flags = [];
-        if (n.bn)               flags.push('B');    // bend
-        if (n.sl != null && n.sl >= 0) flags.push('S');    // slide
+        if (_ndHasBend(n))      flags.push('B');    // bend
+        if (_ndHasSlide(n))     flags.push('S');    // slide
         if (n.hm || n.hp)       flags.push('H');    // harmonic / pinch
         if (n.ho)               flags.push('h');    // hammer-on
         if (n.po)               flags.push('p');    // pull-off
@@ -6192,7 +6210,7 @@ function createNoteDetector(options = {}) {
                         notes: _ndSingleNotes.map(cn => ({
                             s: cn.s, f: cn.f,
                             ho: !!cn.ho, po: !!cn.po,
-                            b: !!cn.b, sl: !!cn.sl, hm: !!cn.hm,
+                            b: _ndHasBend(cn), sl: _ndHasSlide(cn), hm: !!cn.hm,
                         })),
                     };
                     const gen = sessionGen;
@@ -6332,7 +6350,7 @@ function createNoteDetector(options = {}) {
                         notes: group.map(cn => ({
                             s: cn.s, f: cn.f,
                             ho: !!cn.ho, po: !!cn.po,
-                            b: !!cn.b, sl: !!cn.sl, hm: !!cn.hm,
+                            b: _ndHasBend(cn), sl: _ndHasSlide(cn), hm: !!cn.hm,
                         })),
                     };
                     const gen = sessionGen;
@@ -10154,7 +10172,7 @@ function createNoteDetector(options = {}) {
 
     function _calLabEffectivePitchTol(chartPitch, flags) {
         let cents = chartPitch;
-        if (flags && (flags.b || flags.sl)) cents = Math.max(cents, 100);
+        if (flags && (_ndHasBend(flags) || _ndHasSlide(flags))) cents = Math.max(cents, 100);
         if (flags && flags.hm) cents = 0;
         return cents;
     }
@@ -10498,8 +10516,8 @@ function createNoteDetector(options = {}) {
                 f: n.f,
                 ho: !!n.ho,
                 po: !!n.po,
-                b: !!n.b,
-                sl: !!n.sl,
+                b: _ndHasBend(n),
+                sl: _ndHasSlide(n),
                 hm: !!n.hm,
             })),
         };
@@ -10519,7 +10537,7 @@ function createNoteDetector(options = {}) {
         const r = batch.results[0];
         const flags = {
             ho: !!noteDef.ho, po: !!noteDef.po,
-            b: !!noteDef.b, sl: !!noteDef.sl, hm: !!noteDef.hm,
+            b: _ndHasBend(noteDef), sl: _ndHasSlide(noteDef), hm: !!noteDef.hm,
         };
         const tick = _calLabTickFromResult(r, flags);
         return {
@@ -10540,7 +10558,7 @@ function createNoteDetector(options = {}) {
             const nd = notes[i] || { s: r.s, f: r.f };
             const flags = {
                 ho: !!nd.ho, po: !!nd.po,
-                b: !!nd.b, sl: !!nd.sl, hm: !!nd.hm,
+                b: _ndHasBend(nd), sl: _ndHasSlide(nd), hm: !!nd.hm,
             };
             return { string: nd.s, fret: nd.f, ..._calLabTickFromResult(r, flags) };
         });
@@ -13704,8 +13722,8 @@ function createNoteDetector(options = {}) {
             mix(Math.round((Number.isFinite(nn.t) ? nn.t : 0) * 1000));
             mix(((nn.s | 0) * 100) + (nn.f | 0));
             mix(Math.round((Number.isFinite(nn.sus) ? nn.sus : 0) * 1000));
-            mix((nn.ho ? 1 : 0) | (nn.po ? 2 : 0) | (nn.b ? 4 : 0)
-                | (nn.sl ? 8 : 0) | (nn.hm ? 16 : 0) | (nn.mt ? 32 : 0));
+            mix((nn.ho ? 1 : 0) | (nn.po ? 2 : 0) | (_ndHasBend(nn) ? 4 : 0)
+                | (_ndHasSlide(nn) ? 8 : 0) | (nn.hm ? 16 : 0) | (nn.mt ? 32 : 0));
         };
         for (const nn of notes) if (nn) mixNote(nn);
         for (const ch of _ndChartChords()) {
@@ -13773,7 +13791,7 @@ function createNoteDetector(options = {}) {
                 s: n.s,
                 f: n.f,
                 sus: Number.isFinite(n.sus) ? n.sus : 0,
-                ho: !!n.ho, po: !!n.po, b: !!n.b, sl: !!n.sl, hm: !!n.hm,
+                ho: !!n.ho, po: !!n.po, b: _ndHasBend(n), sl: _ndHasSlide(n), hm: !!n.hm,
             };
             notes.push(entry);
             byId.set(id, { ...n });
@@ -13792,7 +13810,7 @@ function createNoteDetector(options = {}) {
                     s: cn.s,
                     f: cn.f,
                     sus: Number.isFinite(cn.sus) ? cn.sus : 0,
-                    ho: !!cn.ho, po: !!cn.po, b: !!cn.b, sl: !!cn.sl, hm: !!cn.hm,
+                    ho: !!cn.ho, po: !!cn.po, b: _ndHasBend(cn), sl: _ndHasSlide(cn), hm: !!cn.hm,
                 };
                 notes.push(entry);
                 byId.set(id, { ...cn, t: c.t });
@@ -14020,7 +14038,7 @@ function createNoteDetector(options = {}) {
                 // A bend / slide / harmonic note's pitch deliberately leaves
                 // the chart pitch; widen the pitch gate so the hit rides on
                 // presence + timing, not a moving target.
-                const lenientPitch = !!(cn.b || cn.sl || cn.hm);
+                const lenientPitch = _ndHasBend(cn) || _ndHasSlide(cn) || !!cn.hm;
                 const judgment = makeMatchedJudgment(
                     cn, cn.t, judgedAt, expectedMidi, detectedMidiForJudgment, 1,
                     { pitchError, pitchThresholdCents: lenientPitch ? 600 : undefined }
@@ -14223,7 +14241,7 @@ function createNoteDetector(options = {}) {
                 // That false-`hit` would then make noteStateFor return
                 // 'miss' for the constituent, undoing the whole point of
                 // stamping it with the chord verdict.
-                const lenientPitch = !!(mcn.b || mcn.sl || mcn.hm);
+                const lenientPitch = _ndHasBend(mcn) || _ndHasSlide(mcn) || !!mcn.hm;
                 const mDetMidi = Number.isFinite(bestCents)
                     ? mExpectedMidi + bestCents / 100 : null;
                 mJudgment = makeMatchedJudgment(
@@ -14347,7 +14365,7 @@ function createNoteDetector(options = {}) {
                 s: n.s,
                 f: n.f,
                 sus: Number.isFinite(n.sus) ? n.sus : 0,
-                ho: !!n.ho, po: !!n.po, b: !!n.b, sl: !!n.sl, hm: !!n.hm,
+                ho: !!n.ho, po: !!n.po, b: _ndHasBend(n), sl: _ndHasSlide(n), hm: !!n.hm,
             };
             entries.push(entry);
             byId.set(n.id, { ...n });
@@ -18123,7 +18141,7 @@ function createNoteDetector(options = {}) {
                     && Number.isInteger(n.f) && n.f >= 0)
                 .map(n => ({
                     s: n.s, f: n.f,
-                    ho: !!n.ho, po: !!n.po, b: !!n.b, sl: !!n.sl, hm: !!n.hm,
+                    ho: !!n.ho, po: !!n.po, b: _ndHasBend(n), sl: _ndHasSlide(n), hm: !!n.hm,
                 }));
             let cleanNotes = clean.length ? clean : null;
             // A ctx only makes sense alongside a live target.

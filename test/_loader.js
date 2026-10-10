@@ -310,6 +310,9 @@ function loadDetectionCore({ sandboxBeforeRun } = {}) {
             };
         },
         calibrateOffsetMs: sandbox._ndCalibrateOffsetMs,
+        // Technique-flag readers (wire `sl`/`slu`/`bn` or boolean `b`/`sl`).
+        hasSlide: sandbox._ndHasSlide,
+        hasBend: sandbox._ndHasBend,
         // Game-scoring pure helpers (points / multiplier / grade layer).
         scoringHealthy: sandbox._ndScoringHealthy,
         multiplierForStreak: sandbox._ndMultiplierForStreak,
