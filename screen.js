@@ -264,14 +264,28 @@ function _ndSyncMlGate(token, wantsMl, audio) {
     } catch (_) { /* downlevel / transient — leave state so a later sync retries */ }
 }
 
+// Lowercase — compared against the lowercased filename. Core renamed the
+// seeded pack to feedBack-… (#900); keep the legacy name for older libraries.
 const _ND_DIAGNOSTIC_FILENAME_MARKERS = [
+    'feedback-diagnostic-basic-guitar.sloppak',
     'slopsmith-diagnostic-basic-guitar.sloppak',
 ];
 
+// True when a lowercased (already URI-decoded) filename's basename is exactly
+// one of the track's pack names. filenameIncludes is a string or a list.
+function _ndTrackMatchesFilename(track, lowerFn) {
+    if (!track || !track.filenameIncludes || !lowerFn) return false;
+    const base = String(lowerFn).split(/[\\/]/).pop();
+    return [].concat(track.filenameIncludes)
+        .some((m) => base === String(m).toLowerCase());
+}
+
+// Same exact-basename rule as the catalog match, so the playSong wrapper and
+// _getDiagnosticTrackForSession agree on what counts as the diagnostic pack.
 function _ndFilenameLooksDiagnostic(fn) {
-    const lower = String(fn || '').toLowerCase();
-    if (!lower) return false;
-    return _ND_DIAGNOSTIC_FILENAME_MARKERS.some((m) => lower.includes(m));
+    return _ndTrackMatchesFilename(
+        { filenameIncludes: _ND_DIAGNOSTIC_FILENAME_MARKERS },
+        String(fn || '').toLowerCase());
 }
 
 // Escape untrusted text before interpolating into an innerHTML string.
@@ -16777,11 +16791,13 @@ function createNoteDetector(options = {}) {
     const _DIAGNOSTIC_TRACK_CATALOG = [
         {
             id: 'basic-guitar-6',
-            title: 'Slopsmith Diagnostic — Basic Guitar',
-            artist: 'Slopsmith',
+            // Core seeds this as feedBack-diagnostic-… (#900; formerly
+            // slopsmith-diagnostic-…). Match exactly those two pack names.
+            title: 'FeedBack Diagnostic — Basic Guitar',
+            artist: 'FeedBack',
             arrangement: 'Diagnostic Guitar',
-            filenameIncludes: 'slopsmith-diagnostic-basic-guitar.sloppak',
-            dlcRelativePath: 'diagnostics-builtin/slopsmith-diagnostic-basic-guitar.sloppak',
+            filenameIncludes: _ND_DIAGNOSTIC_FILENAME_MARKERS,
+            dlcRelativePath: 'diagnostics-builtin/feedBack-diagnostic-basic-guitar.sloppak',
             instrument: 'guitar',
             stringCount: 6,
             reportProfile: 'basic-guitar-v1',
@@ -16834,8 +16850,7 @@ function createNoteDetector(options = {}) {
         if (!diagFn) return;
         const prevLower = prevFn.toLowerCase();
         if (prevLower === diagFn.toLowerCase()) return;
-        if (track.filenameIncludes
-            && prevLower.includes(String(track.filenameIncludes).toLowerCase())) {
+        if (_ndTrackMatchesFilename(track, prevLower)) {
             return;
         }
         const hw = resolveHw();
@@ -16999,8 +17014,7 @@ function createNoteDetector(options = {}) {
         const currentHw = resolveHw();
         const info = (currentHw && currentHw.getSongInfo) ? currentHw.getSongInfo() : {};
         for (const track of _DIAGNOSTIC_TRACK_CATALOG) {
-            if (track.filenameIncludes
-                && fn.includes(String(track.filenameIncludes).toLowerCase())) {
+            if (_ndTrackMatchesFilename(track, fn)) {
                 return track;
             }
         }

@@ -253,6 +253,8 @@ function loadDetectionCore({ sandboxBeforeRun } = {}) {
     // do. Expose the raw functions; tests pass state in directly.
     return {
         yinDetect: rewrapYin(sandbox._ndYinDetect),
+        filenameLooksDiagnostic: sandbox._ndFilenameLooksDiagnostic,
+        trackMatchesFilename: sandbox._ndTrackMatchesFilename,
         hpsDetect: rewrapYin(sandbox._ndHpsDetect),
         freqToMidi: sandbox._ndFreqToMidi,
         midiFromStringFret: midiFromStringFretWrapped,
