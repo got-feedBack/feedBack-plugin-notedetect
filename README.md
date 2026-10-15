@@ -19,6 +19,8 @@ git clone https://github.com/got-feedback/feedback-plugin-notedetect.git note_de
 5. The note's **gem lights up brightly** on the highway when you hit it cleanly — and a sustained note keeps glowing for as long as you keep playing it on-pitch; a miss is flagged on the note too
 6. Running accuracy and streak shown in the HUD
 
+**Capo charts** are read the Rocksmith way: a fretted note's fret counts from the nut (it already includes the capo), and only fret 0 means an open string, which sounds at the capo. A capo-4 E chord is charted `A7 D6 G0 B5`. The expected pitch is `open + fret` for fretted notes and `open + capo` for open ones. A `setVerifyTarget` context that passes `tuning` + `capo` is read the same way.
+
 > **How step 5 renders depends on the active highway renderer.** The plugin publishes a per-note judgment via Slopsmith core's `highway.setNoteStateProvider` hook (slopsmith#254 — honored by the bundled 2D and 3D highways; other renderers can read the same data from the core renderer `bundle`'s `getNoteState(note, chartTime)` method). On the **default 2D highway** the plugin *also* draws its own canvas overlay — the slide-down red ✕ miss markers below the now-line, the EARLY/LATE/SHARP/FLAT diagnostic labels, and the cyan "currently detected" indicator. On a **custom renderer** (e.g. the 3D highway) that canvas overlay is suppressed — the renderer owns the per-note feedback there (the 3D highway shows hit/active glow and a red miss outline + the diagnostic labels itself). The HUD (accuracy/streak), the end-of-song summary, and the optional screen-edge flash are DOM, not canvas, so they show under any renderer. On an **older core** without the hook, the plugin falls back to the 2D-canvas green hit ring / red miss marker overlay near the note regardless of renderer.
 
 ## Audio Input Channel Selection
@@ -123,6 +125,19 @@ Field reference for the per-note events:
 | `hit` | `true` only when timing and pitch are both clean | all events (`false` for misses) |
 | `timingState` / `pitchState` | Independent diagnostic axes: `OK`, `EARLY`, `LATE`, `SHARP`, or `FLAT` | clean hits and matched diagnostic misses; `null` for pure misses |
 | `timingError` / `pitchError` | Signed timing error in milliseconds and signed pitch error in cents; `pitchError` is octave-folded to the nearest octave (so it is not necessarily equal to `(detectedMidi - expectedMidi) * 100`) | clean hits and matched diagnostic misses; `null` for pure misses |
+| `chord` / `notes` | `true` for a chord-level judgment; `notes` lists the chord's `{ s, f }` (`note` is then the lead string) | all events |
+| `hitStrings` / `totalStrings` / `score` | How many of the chord's strings rang, out of how many, and the ratio the Chord Leniency setting is compared with | chord judgments where the scorer ran |
+| `key` | Stable id of the judged chart note, the same key the highway's `getNoteState` hands back as `popKey`: `"<time>_<string>_<fret>"` for a single note (e.g. `"12.345_2_7"`), `"<time>_chord"` for a chord | all events (v1.33+) |
+| `strings` | Per-string verdicts, `[{ s, f, hit, centsError, snr?, detectedAt? }]` (`centsError` rounded cents or `null`; `snr` and `detectedAt` from the desktop engine). For a partial chord this says which strings rang. A missed browser-path chord reports the best frame the scorer saw in its window | chord judgments; single notes on the desktop engine path. `null` when no per-string measurement exists |
+| `techniques` | Named techniques of the chart note: `bend`, `slide`, `harmonic`, `pinchHarmonic`, `hammerOn`, `pullOff`, `tap`, `palmMute`, `mute`, `fretHandMute`, `vibrato`, `tremolo`, `accent`, `slap`, `pluck`. `[]` for a plain note. The raw chart note stays in `chartNote` | all chart judgments (v1.33+); `null` for external verdicts |
+| `latencyMs` / `avOffsetMs` | The input-latency compensation and A/V offset in effect when the note was judged. `timingError` already has both applied; add `latencyMs` back to get the uncompensated offset | all events (v1.33+) |
+| `detector` | Which path judged it: `desktop-engine-verifier`, a desktop detector label, `web-yin` / `web-hps` / `web-crepe`, or `external` | all events (v1.33+) |
+| `section` | Name of the chart section the note sits in (by chart time), or `null` | all events (v1.33+) |
+| `counted` / `points` / `multiplier` / `streak` | Whether the judgment counted toward the score, the points it earned, and the multiplier and streak after it | all events (v1.33+) |
+| `isDefault` | `true` for the main player's detector, `false` for a splitscreen panel's | all events (v1.33+) |
+| `verdictAt` / `noteEnd` | Chart time (highway clock, seconds) when the verdict was emitted, and when the judged note / chord finished (`noteTime` + its longest sustain). The desktop engine judges a sustained note only after its sustain closes, so `verdictAt` can be well past `noteTime`; a renderer that has already culled the gem can use these to still flash the hit | all chart judgments (v1.33+); `null` without a note time |
+
+Fields are additive: existing ones keep their meaning, and new ones may appear. Timing class for a scorecard is `timingState` (`OK` / `EARLY` / `LATE`) with `timingError` as the signed offset.
 
 Example — log every hit:
 
@@ -130,6 +145,21 @@ Example — log every hit:
 window.addEventListener('notedetect:hit', (e) => {
     const { note, time, confidence } = e.detail;
     console.log(`hit ${note.s}/${note.f} at t=${time.toFixed(2)}s (conf ${confidence.toFixed(2)})`);
+});
+```
+
+Example — a per-string tally for partial chords:
+
+```js
+const perString = {};
+window.addEventListener('notedetect:miss', (e) => {
+    const j = e.detail;
+    if (!j.counted || !j.isDefault || !j.chord || !j.strings) return;
+    for (const st of j.strings) {
+        const k = `${st.s}`;
+        perString[k] = perString[k] || { rang: 0, missed: 0 };
+        perString[k][st.hit ? 'rang' : 'missed']++;
+    }
 });
 ```
 
@@ -182,6 +212,8 @@ On **Slopsmith Desktop**, when the native audio engine has the Spotify **Basic P
 - **Chords** — judged by the native `audio.scoreChord` IPC, gated on a fresh chord-pitch onset. When the ML model is loaded the engine's scorer checks each chart note's expected pitch against the model's active pitch set — genuine polyphonic transcription, where a **wrong** note is simply absent from the set rather than false-positiving on a neighbour's energy-band bleed; without the model it uses the constraint-based per-string scorer.
 
 This path is fully feature-detected and fail-soft: a desktop build without `detectNotes` still scores single notes via `getPitchDetection`; one without the `scoreChord` IPC skips chord scoring; and a build without the ML model falls back to YIN/`ChordScorer`. The browser build is unaffected and keeps the JS YIN/HPS/CREPE + constraint path. See `slopsmith-desktop/src/audio/MlNoteDetector.*`.
+
+> **Retuned / transformed charts.** Expected pitches follow the chart the player actually sees. When a core [`chart-transform`](https://github.com/got-feedback/feedback/blob/main/docs/capability-recipes.md#chart-transform-provider) provider rewrites the chart (e.g. a retune, transposition or "convert to E standard" view), the plugin scores against the host's *effective* `highway.getTuning()`, `getCapo()` and `getCentOffset()` instead of the original `getSongInfo()` metadata, and re-syncs within a frame when a provider restages mid-song. The effective `centOffset` is applied too (minus whole octaves, which octave-folded matching and the bass base tables already cover — an extended-range bass's `-1200` changes nothing), so a pitch-shifted backing track (say `-100` cents for a half-step-down retune, or `+11.8` for an A443 recording) scores against where the audio really sits. A plugin that pitch-shifts the song should publish that shift as a chart-transform provider returning `tuning` and/or `centOffset`; note detection follows with no extra wiring. On the desktop engine path offsets are rounded to whole semitones (the engine reads integers), and the engine's pitch gate is widened by the rounding error (up to 50 cents) so a sub-semitone shift such as a +45-cent record can't push notes out of tolerance.
 
 ## Requirements
 

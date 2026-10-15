@@ -259,6 +259,14 @@ function loadDetectionCore({ sandboxBeforeRun } = {}) {
         midiToStringFret: midiToStringFretWrapped,
         resolveDisplayFingering: resolveDisplayFingeringWrapped,
         nearestOctaveCents: sandbox._ndNearestOctaveCents,
+        // Effective-tuning helpers (chart-transform / centOffset follow).
+        rawMidiFromStringFret: sandbox._ndMidiFromStringFret,
+        refShiftCents: sandbox._ndRefShiftCents,
+        engineOffsets: (offsets) => {
+            const r = sandbox._ndEngineOffsets(offsets);
+            return Array.isArray(r) ? Array.from(r) : r;
+        },
+        engineRoundingCents: sandbox._ndEngineRoundingCents,
         stringBandHz: sandbox._ndStringBandHz,
         bandEnergy: sandbox._ndBandEnergy,
         constraintCheckString: sandbox._ndConstraintCheckString,
@@ -310,6 +318,9 @@ function loadDetectionCore({ sandboxBeforeRun } = {}) {
             };
         },
         calibrateOffsetMs: sandbox._ndCalibrateOffsetMs,
+        // Technique-flag readers (wire `sl`/`slu`/`bn` or boolean `b`/`sl`).
+        hasSlide: sandbox._ndHasSlide,
+        hasBend: sandbox._ndHasBend,
         // Game-scoring pure helpers (points / multiplier / grade layer).
         scoringHealthy: sandbox._ndScoringHealthy,
         multiplierForStreak: sandbox._ndMultiplierForStreak,

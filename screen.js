@@ -316,7 +316,7 @@ const _ND_AUTO_ENABLE_RETRY_MS = 1500;
 // exact build that produced it. The script tag has no `import`/`fetch`
 // hook to read package.json at load time, so this is the single
 // hand-maintained constant the diagnostic path keys off of.
-const _ND_VERSION = '1.32.0';
+const _ND_VERSION = '1.33.0';
 
 // Bleed-rescue tuning for the low-bass blind spot. A bass DI's fundamental is
 // weaker than its 2nd harmonic and an open string / neighbour often rings the
@@ -514,7 +514,8 @@ function _ndVerifySigFor(arrangement, stringCount, offsets, capo) {
 //   • `tuning` / `offsets`: per-string semitone OFFSETS from standard tuning
 //     (the chart convention, matching the instance's tuningOffsets). `offsets`
 //     is also accepted so getVerifyContext() output round-trips back in. This
-//     path honors ctx.capo.
+//     path honors ctx.capo, with the chart's fret convention (fretted notes
+//     count from the nut, fret 0 sounds at the capo; see _ndAbsoluteFret).
 // Either array is read BY STRING INDEX — a non-finite entry maps to 0 in place,
 // never reindexed, so one bad string can't shift the others' pitch mapping.
 //
@@ -607,10 +608,87 @@ function _ndMidiToName(midi) {
     return _ND_PITCH_NAMES[pc] + octave;
 }
 
+// Capo charts follow the Rocksmith convention: a FRETTED note's fret is
+// absolute (counted from the nut, so it already includes the capo) and only
+// fret 0 means "open", which with a capo on is the capo fret. A capo-4 E
+// chord is charted A7 D6 G0 B5, not A3 D2 G0 B1. Adding the capo to every
+// fret put each fretted note `capo` semitones sharp, so capo charts barely
+// scored. Returns the fret counted from the nut.
+function _ndAbsoluteFret(fret, capo) {
+    return fret === 0 && capo > 0 ? capo : fret;
+}
+
 function _ndMidiFromStringFret(string, fret, arrangement, stringCount, offsets, capo) {
     const base = _ndStandardMidiFor(arrangement, stringCount);
     const offset = offsets && offsets[string] !== undefined ? offsets[string] : 0;
-    return base[string] + offset + (capo || 0) + fret;
+    return base[string] + offset + _ndAbsoluteFret(fret, capo);
+}
+
+// The desktop engine maps (string, fret) to pitch as open + capo + fret and
+// has no switch for the chart convention above. So hand it capo 0 and
+// rewrite open (fret 0) notes to the capo fret: the engine then expects the
+// same pitches as _ndMidiFromStringFret. Used by both bridge funnels
+// (setChart and scoreChord payloads both carry `capo` + `notes[].f`).
+// Returns the payload unchanged when there's no capo.
+function _ndEngineCapoPayload(payload) {
+    if (!payload || !(payload.capo > 0)) return payload;
+    const capo = payload.capo;
+    const notes = Array.isArray(payload.notes)
+        ? payload.notes.map(n => (n && n.f === 0 ? { ...n, f: capo } : n))
+        : payload.notes;
+    return { ...payload, capo: 0, notes };
+}
+
+// How far before a chord's timing window the engine verifier's detect stamp
+// can land and still mean "verified as the window opened": the renderer
+// pushes the playhead the engine stamps with once per detect tick, so a
+// stamp can trail the engine's own clock by about a poll. See
+// _ndFinalizeChordVerdict.
+const _ND_ENGINE_STAMP_SLACK_S = 0.1;
+
+// Whole-chart reference-pitch shift (cents) → the part note detection applies.
+// The host's effective `centOffset` (`highway.getCentOffset()`: a chart-
+// transform provider's value, else the chart's own `<centOffset>`) says the
+// audio sits N cents off the chart's nominal pitch — a retune/pitch-shift
+// transform, a true-tuned A443 recording (+11.8), a song shifted to E standard.
+// Whole octaves are dropped: matching is already octave-folded and the
+// per-arrangement base tables already place bass in its own octave, so the
+// common extended-range-bass `-1200` must keep scoring exactly as before. The
+// remainder lands in (-600, 600] and is folded into the per-string offsets
+// (as fractional semitones) by _syncChartStateFromHw, so it reaches every
+// expected MIDI / band range through _ndMidiFromStringFret unchanged.
+function _ndRefShiftCents(centOffset) {
+    const c = Number(centOffset);
+    if (!Number.isFinite(c)) return 0;
+    const r = c - 1200 * Math.round(c / 1200);
+    return Math.abs(r) < 1e-6 ? 0 : r;
+}
+
+// The desktop engine's chart/scoreChord contexts read tuning offsets as
+// Int32 (truncating), so a fractional reference shift is rounded to the
+// nearest semitone at the bridge boundary — a whole-semitone retune still
+// reaches the engine exactly; a sub-semitone residue (e.g. A443) stays a
+// JS-path refinement that sits inside the engine's pitch tolerance anyway.
+function _ndEngineOffsets(offsets) {
+    if (!Array.isArray(offsets)) return offsets;
+    return offsets.map(o => Math.round(Number(o) || 0));
+}
+
+// Worst-case cents _ndEngineOffsets moves any string by (0..50). The engine
+// then expects a pitch up to that far from where the guitar really sits, so
+// _ndBridgeSetChart widens the chart's pitch gate by it: a recording at
+// +45 c (common on old records) rounds to 0 and would otherwise put every
+// note 45 c off before the player's own error. Rounded up because the
+// engine may read the gate as an integer.
+function _ndEngineRoundingCents(offsets) {
+    if (!Array.isArray(offsets)) return 0;
+    let worst = 0;
+    for (const o of offsets) {
+        const v = Number(o) || 0;
+        const err = Math.abs(v - Math.round(v)) * 100;
+        if (err > worst) worst = err;
+    }
+    return worst > 1e-6 ? Math.ceil(worst - 1e-6) : 0;
 }
 
 function _ndClassifyTiming(timingErrorMs, timingThresholdMs, lateGraceMs) {
@@ -1295,6 +1373,81 @@ function _ndGradeClean(hit, timingError, pitchError, cleanTimingMs, cleanPitchCe
     return { clean: false, looseReason: (tLoose && pLoose) ? 'both' : (tLoose ? 'timing' : 'pitch') };
 }
 
+// ── Public judgment-event enrichment (notedetect:hit / notedetect:miss) ──
+// Named techniques of a chart note, for consumers of the judgment events.
+// Bend / slide go through _ndHasBend / _ndHasSlide, so both the core wire
+// format (`bn` bend amount, `sl`/`slu` slide-to fret with -1 = none) and the
+// boolean `b`/`sl` shape note_detect builds for the scorers read right.
+// Empty array when the note has no technique; null when there's no chart
+// note (external verdicts).
+function _ndTechniqueNames(n) {
+    if (!n || typeof n !== 'object') return null;
+    const out = [];
+    if (_ndHasBend(n)) out.push('bend');
+    if (_ndHasSlide(n)) out.push('slide');
+    if (n.hm) out.push('harmonic');
+    if (n.hp) out.push('pinchHarmonic');
+    if (n.ho) out.push('hammerOn');
+    if (n.po) out.push('pullOff');
+    if (n.tp) out.push('tap');
+    if (n.pm) out.push('palmMute');
+    if (n.mt) out.push('mute');
+    if (n.fhm) out.push('fretHandMute');
+    if (n.vb) out.push('vibrato');
+    if (n.tr) out.push('tremolo');
+    if (n.ac) out.push('accent');
+    if (n.slp) out.push('slap');
+    if (n.plk) out.push('pluck');
+    return out;
+}
+
+// Per-string verdicts in the public event shape: [{ s, f, hit, centsError,
+// snr? , detectedAt? }]. Accepts the chord scorer's per-string results
+// (`hit`) and raw engine verdicts (`detected`). Plain objects only, so a
+// consumer can keep them after the event.
+function _ndStringVerdicts(entries) {
+    if (!Array.isArray(entries)) return null;
+    const out = [];
+    for (const r of entries) {
+        if (!r || !Number.isFinite(r.s) || !Number.isFinite(r.f)) continue;
+        const v = {
+            s: r.s,
+            f: r.f,
+            hit: !!(r.hit !== undefined ? r.hit : r.detected),
+            centsError: Number.isFinite(r.centsError) ? Math.round(r.centsError) : null,
+        };
+        if (Number.isFinite(r.snr)) v.snr = r.snr;
+        if (Number.isFinite(r.detectedAt)) v.detectedAt = r.detectedAt;
+        out.push(v);
+    }
+    return out;
+}
+
+// Chart time a judged note / chord finishes: noteTime plus the longest
+// sustain among its chart note and (for chords) its constituents. null when
+// the judgment has no note time.
+function _ndJudgmentNoteEnd(j) {
+    if (!j || !Number.isFinite(j.noteTime)) return null;
+    let sus = 0;
+    const take = (n) => { if (n && Number.isFinite(n.sus) && n.sus > sus) sus = n.sus; };
+    take(j.chartNote);
+    if (Array.isArray(j.notes)) for (const n of j.notes) take(n);
+    return j.noteTime + sus;
+}
+
+// Name of the chart section containing time `t` (sections sorted by
+// `time`), or null before the first one / without sections.
+function _ndSectionAt(sections, t) {
+    if (!Array.isArray(sections) || !Number.isFinite(t)) return null;
+    let name = null;
+    for (const sec of sections) {
+        if (!sec || !Number.isFinite(sec.time)) continue;
+        if (sec.time <= t) name = sec.name != null ? String(sec.name) : null;
+        else break;
+    }
+    return name;
+}
+
 function _ndMakeJudgment(opts) {
     const o = opts || {};
     const matched = !!o.matched;
@@ -1384,6 +1537,9 @@ function _ndMakeJudgment(opts) {
         totalStrings: Number.isFinite(o.totalStrings) ? o.totalStrings : undefined,
         score: Number.isFinite(o.score) ? o.score : undefined,
         monophonicDetected: o.monophonicDetected,
+        // Per-string verdicts ({ s, f, hit, centsError, ... }) when the
+        // scorer measured them — see _ndStringVerdicts. null otherwise.
+        strings: Array.isArray(o.strings) ? o.strings : null,
     };
 }
 
@@ -1406,7 +1562,9 @@ function _ndMidiToStringFret(midiNote, arrangement, stringCount, offsets, capo) 
         if (dist < bestDist) {
             bestDist = dist;
             bestString = s;
-            bestFret = fret;
+            // `fret` counts from the capo here; report it from the nut,
+            // the way the chart writes it (see _ndAbsoluteFret).
+            bestFret = fret > 0 && capo > 0 ? fret + capo : fret;
         }
     }
     return { string: bestString, fret: bestFret };
@@ -2143,6 +2301,23 @@ function _ndKeysToReopenOnSeek(lastT, t, tolerance, keys) {
     return out;
 }
 
+// Technique-flag readers. Core's highway wire format (lib/song.py
+// note_to_wire) sends `sl` / `slu` as the slide-to fret with -1 meaning
+// "no slide", and the bend amount as `bn` (0 = none). A bare `!!cn.sl` reads
+// that -1 as true, so EVERY note looked like a slide and got the widened pitch
+// window. These accept both the wire numbers and the booleans note_detect's
+// own payloads carry (`{ b: true, sl: true }` — calibration lab, verify
+// targets, the engine chart), so they're safe on either shape.
+function _ndHasSlide(n) {
+    if (!n) return false;
+    const on = (v) => v === true || (typeof v === 'number' && v >= 0);
+    return on(n.sl) || on(n.slu);
+}
+function _ndHasBend(n) {
+    if (!n) return false;
+    return !!(n.b || (typeof n.bn === 'number' ? n.bn > 0 : n.bn));
+}
+
 // Score a chord by checking each of its constituent notes against their
 // respective string frequency bands. Returns { score, hitStrings, totalStrings }.
 //
@@ -2150,7 +2325,8 @@ function _ndKeysToReopenOnSeek(lastT, t, tolerance, keys) {
 // minHitRatio — fraction of strings that must ring for the chord to count as a hit.
 //
 // Each `chordNotes` entry may carry abbreviated technique flags from the chart
-// note data (`cn.ho`, `cn.po`, `cn.b`, `cn.sl`, `cn.hm`), used to adjust
+// note data (`cn.ho`, `cn.po`, bend, slide, `cn.hm` — bend/slide read via
+// _ndHasBend/_ndHasSlide so wire-format notes work), used to adjust
 // per-string thresholds:
 //   - ho/po (hammer-on / pull-off): lower energyThreshold (no fresh pick attack)
 //   - b/sl (bend / slide): widen pitchCheckCents (pitch is in motion)
@@ -2179,7 +2355,7 @@ function _ndScoreChord(buffer, sampleRate, chordNotes, arrangement, stringCount,
             // Hammer-on / pull-off: no pick attack, energy will be lower
             energyThreshold = 0.015;
         }
-        if (cn.b || cn.sl) {
+        if (_ndHasBend(cn) || _ndHasSlide(cn)) {
             // Bend / slide: pitch is moving, widen the pitch window
             cents = Math.max(cents, 100);
         }
@@ -3373,6 +3549,9 @@ function createNoteDetector(options = {}) {
     let tuningOffsets = [0, 0, 0, 0, 0, 0];
     let capo = 0;
     let currentStringCount = 6; // kept in sync with tuningOffsets.length
+    // Effective-tuning inputs the fields above were last synced from (see
+    // _ndResyncIfTuningChanged); null = never synced.
+    let _ndSyncedTuningKey = null;
 
     // Audio buffers
     let accumBuffer = new Float32Array(0);
@@ -3526,6 +3705,8 @@ function createNoteDetector(options = {}) {
     }
     function _ndBridgeScoreChord(ctx) {
         const a = _ndBridgeAudio(); if (!a) return Promise.resolve(null);
+        ctx = _ndEngineCapoPayload(ctx);
+        if (ctx && Array.isArray(ctx.offsets)) ctx = { ...ctx, offsets: _ndEngineOffsets(ctx.offsets) };
         if (sourceId != null && typeof a.scoreSourceChord === 'function')
             return a.scoreSourceChord(sourceId, ctx);
         if (sourceId == null && typeof a.scoreChord === 'function')
@@ -3540,6 +3721,18 @@ function createNoteDetector(options = {}) {
     }
     function _ndBridgeSetChart(chart) {
         const a = _ndBridgeAudio(); if (!a) return Promise.resolve(null);
+        chart = _ndEngineCapoPayload(chart);
+        if (chart && Array.isArray(chart.tuningOffsets)) {
+            // Rounding the offsets for the Int32 engine moves expected pitches
+            // by up to 50 c; widen the presence gate by the same amount so a
+            // sub-semitone reference shift can't push notes out of tolerance.
+            // (0 = energy-only, so it stays 0.) scoreChord keeps its own window.
+            const slack = _ndEngineRoundingCents(chart.tuningOffsets);
+            chart = { ...chart, tuningOffsets: _ndEngineOffsets(chart.tuningOffsets) };
+            if (slack > 0 && Number.isFinite(chart.pitchCheckCents) && chart.pitchCheckCents > 0) {
+                chart.pitchCheckCents += slack;
+            }
+        }
         if (sourceId != null && typeof a.setSourceChart === 'function')
             return a.setSourceChart(sourceId, chart);
         if (sourceId == null && typeof a.setChart === 'function')
@@ -4131,6 +4324,14 @@ function createNoteDetector(options = {}) {
                             // owns the slot; _ndOtherOwnsOurSlot() covers a
                             // sibling instance on the same engine source.
                             if (_ndHostChartSuspended || _ndOtherOwnsOurSlot()) return;
+                            // Follow a mid-song chart-transform restage
+                            // (live retune) before ANY branch below maps a
+                            // (string, fret) to a pitch: the engine-verifier
+                            // re-push, and the matchNotes(null) fallback a
+                            // downlevel addon without the verifier API runs.
+                            // Native-frame mode resyncs again in processFrame;
+                            // the identity check makes that a no-op.
+                            _ndResyncIfTuningChanged();
                             // Native-frame detection (gear opt-in): pull the
                             // engine's post-gate mono PCM and run note_detect's
                             // OWN YIN/HPS/CREPE on it via the SAME processFrame
@@ -4181,6 +4382,9 @@ function createNoteDetector(options = {}) {
                                 // song:loaded (and can switch mid-session);
                                 // re-push whenever the live chart diverges
                                 // from what the engine currently holds.
+                                // A live retune restage changes the
+                                // effective tuning (resynced above), which
+                                // is in the signature, so it re-pushes here too.
                                 if (_ndChartSignature() !== _ndVerifierChartSig) {
                                     await _ndPushChartToBridge();
                                     if (!enabled || gen !== sessionGen) return;
@@ -5059,6 +5263,9 @@ function createNoteDetector(options = {}) {
 
     // ── Frame processing ──────────────────────────────────────────────
     async function processFrame(buffer) {
+        // Follow a mid-song chart-transform restage (live retune) before
+        // mapping any (string, fret) to an expected pitch this frame.
+        _ndResyncIfTuningChanged();
         // Append to the rolling raw-audio buffer for the bass miss rescue
         // (checkMisses). Bass only — guitar's higher fundamentals resolve in
         // the short window, so it doesn't need (or pay for) this.
@@ -5485,6 +5692,7 @@ function createNoteDetector(options = {}) {
             totalStrings: extra.totalStrings,
             score: extra.score,
             monophonicDetected: extra.monophonicDetected,
+            strings: extra.strings,
             lateGraceMs: extra.lateGraceMs,
         });
     }
@@ -5619,6 +5827,7 @@ function createNoteDetector(options = {}) {
             totalStrings: extra.totalStrings,
             score: extra.score,
             lateGraceMs: extra.lateGraceMs,
+            strings: extra.strings,
         });
     }
 
@@ -5745,8 +5954,8 @@ function createNoteDetector(options = {}) {
     function _diagTechFlags(n) {
         if (!n) return null;
         const flags = [];
-        if (n.bn)               flags.push('B');    // bend
-        if (n.sl != null && n.sl >= 0) flags.push('S');    // slide
+        if (_ndHasBend(n))      flags.push('B');    // bend
+        if (_ndHasSlide(n))     flags.push('S');    // slide
         if (n.hm || n.hp)       flags.push('H');    // harmonic / pinch
         if (n.ho)               flags.push('h');    // hammer-on
         if (n.po)               flags.push('p');    // pull-off
@@ -5873,7 +6082,7 @@ function createNoteDetector(options = {}) {
                 if (_ndIsStreakMilestone(streak)) {
                     dispatchFx({ fxType: 'milestone', streak, mult: multiplier });
                 }
-                updateSectionStat('hit');
+                updateSectionStat('hit', judgment.noteTime);
                 // A hit breaks the contiguous-miss run the auto-drill watches.
                 _autoDrillMissStreak = 0;
             } else {
@@ -5886,7 +6095,7 @@ function createNoteDetector(options = {}) {
                     dispatchFx({ fxType: 'streakBreak', lostStreak, prevMult: multiplier });
                 }
                 multiplier = 1;
-                updateSectionStat('miss');
+                updateSectionStat('miss', judgment.noteTime);
                 // Grow the contiguous-miss run and, at the threshold, drop into a
                 // drill on the fluffed passage (auto-drill). Track the run's
                 // chart-time span so the drill targets exactly those notes.
@@ -5927,7 +6136,41 @@ function createNoteDetector(options = {}) {
                 _scoreLedger.set(key, { t: _ledgerT, hit: !!judgment.hit, chord: !!judgment.chord });
             }
         }
-        if (emit) dispatchJudgment(judgment);
+        if (emit) {
+            _ndEnrichJudgment(key, judgment, count);
+            dispatchJudgment(judgment);
+        }
+    }
+
+    // Additive fields for notedetect:hit / notedetect:miss consumers (stats
+    // and scorecard plugins) — see README "Events". Stamped once, at emit;
+    // never changes what the judgment scored.
+    function _ndEnrichJudgment(key, judgment, counted) {
+        if (!judgment) return;
+        try {
+            judgment.key = key;
+            judgment.counted = !!counted;
+            judgment.isDefault = isDefault;
+            judgment.techniques = _ndTechniqueNames(judgment.chartNote || judgment.note);
+            if (!Array.isArray(judgment.strings)) judgment.strings = null;
+            judgment.latencyMs = Math.round(latencyOffset * 1000);
+            judgment.avOffsetMs = (hw && hw.getAvOffset) ? Math.round(hw.getAvOffset()) : 0;
+            judgment.detector = judgment._external ? 'external' : _ndVerifierPathLabel();
+            // The section the NOTE sits in (by chart time), not the
+            // playhead's: engine verdicts land ~0.4 s late.
+            judgment.section = _ndSectionNameAt(judgment.noteTime) || currentSection || null;
+            // When the verdict landed vs when the note finished, both on the
+            // highway's chart clock. The engine verifier judges a sustained
+            // note / chord only after its sustain closes, so verdictAt can
+            // sit well past noteTime — a renderer that has already culled
+            // the gem can use these to show the hit anyway (see README).
+            const _hwNow = (hw && hw.getTime) ? Number(hw.getTime()) : NaN;
+            judgment.verdictAt = Number.isFinite(_hwNow) ? _hwNow : null;
+            judgment.noteEnd = _ndJudgmentNoteEnd(judgment);
+            judgment.points = Number.isFinite(judgment._ndPoints) ? judgment._ndPoints : 0;
+            judgment.multiplier = multiplier;
+            judgment.streak = streak;
+        } catch (_) { /* enrichment is best-effort; never block the verdict */ }
     }
 
     // Timing-free, chart-aware verify hook. When a consumer (e.g. Step Mode,
@@ -6192,7 +6435,7 @@ function createNoteDetector(options = {}) {
                         notes: _ndSingleNotes.map(cn => ({
                             s: cn.s, f: cn.f,
                             ho: !!cn.ho, po: !!cn.po,
-                            b: !!cn.b, sl: !!cn.sl, hm: !!cn.hm,
+                            b: _ndHasBend(cn), sl: _ndHasSlide(cn), hm: !!cn.hm,
                         })),
                     };
                     const gen = sessionGen;
@@ -6332,7 +6575,7 @@ function createNoteDetector(options = {}) {
                         notes: group.map(cn => ({
                             s: cn.s, f: cn.f,
                             ho: !!cn.ho, po: !!cn.po,
-                            b: !!cn.b, sl: !!cn.sl, hm: !!cn.hm,
+                            b: _ndHasBend(cn), sl: _ndHasSlide(cn), hm: !!cn.hm,
                         })),
                     };
                     const gen = sessionGen;
@@ -6451,6 +6694,7 @@ function createNoteDetector(options = {}) {
                         pitchError: chordPitchError,
                         monophonicDetected: detectedMidi >= 0,
                         lateGraceMs: chordLateGraceMs,
+                        strings: _ndStringVerdicts(chordResult.results),
                     }
                 );
 
@@ -6518,6 +6762,7 @@ function createNoteDetector(options = {}) {
                         score:        useNewSnapshot ? chordResult.score        : prev.score,
                         hitStrings:   useNewSnapshot ? chordResult.hitStrings   : prev.hitStrings,
                         totalStrings: useNewSnapshot ? chordResult.totalStrings : prev.totalStrings,
+                        strings:      useNewSnapshot ? _ndStringVerdicts(chordResult.results) : prev.strings,
                         voicingHit:   voicingEver,
                         voicingT,
                     });
@@ -6529,6 +6774,15 @@ function createNoteDetector(options = {}) {
                     // after the window has fully elapsed.
                     continue;
                 }
+
+                // A strum that scored but landed EARLY (inside the match
+                // window, before the chord hit edge) is usually the previous
+                // chord of the same shape still ringing in a fast run. Don't
+                // lock it in as a miss: a later frame in the window can still
+                // hit, and checkMisses() retires the chord as before if none
+                // does. Its diagnostics aren't cached either, so an early
+                // ring can't pin the voicing rescue's judgedAt to EARLY.
+                if (!chordJudgment.hit && chordJudgment.timingState === 'EARLY') continue;
 
                 // Chord cleared. Mark the chord-level key 'hit' so the
                 // miss aggregator in checkMisses() treats it as a single
@@ -6617,7 +6871,13 @@ function createNoteDetector(options = {}) {
         // (detected:false verdicts, drained by _ndDrainEngineVerdicts), so
         // this renderer-side retire scan is superseded. The browser path —
         // and any desktop session on a downlevel addon — still relies on it.
-        if (_ndUsingEngineVerifier) return;
+        // The section tracker below still has to advance, though, or the
+        // per-section stats stay empty on desktop.
+        if (_ndUsingEngineVerifier) {
+            const avOffsetSec = (hw.getAvOffset ? hw.getAvOffset() / 1000 : 0);
+            _ndTrackSection(hw.getTime() + avOffsetSec - latencyOffset);
+            return;
+        }
         // Reset the per-tick rescue-FFT budget (see _RESCUE_WINDOWS_PER_TICK).
         // checkNote spends against this; once exhausted, further conceded bass
         // misses this tick retire as plain misses instead of running FFTs.
@@ -6827,6 +7087,7 @@ function createNoteDetector(options = {}) {
                             // through.
                             pitchError: null,
                             lateGraceMs: chordLateGraceMs,
+                            strings: cachedChord.strings || null,
                         },
                     )
                     : makeMissJudgment(liveNotes[0], c.t, t, expectedMidi, {
@@ -6836,6 +7097,9 @@ function createNoteDetector(options = {}) {
                         totalStrings: cachedChord ? cachedChord.totalStrings : undefined,
                         score:        cachedChord ? cachedChord.score        : undefined,
                         lateGraceMs: chordLateGraceMs,
+                        // Best frame the scorer saw in the window: which
+                        // strings rang. null when the scorer never ran.
+                        strings: cachedChord ? (cachedChord.strings || null) : null,
                     });
                 if (!voicingRescue) {
                     _ndLogVerifierRejectOnce(chordKey, {
@@ -6871,27 +7135,37 @@ function createNoteDetector(options = {}) {
             }
         }
 
-        const sections = hw.getSections ? hw.getSections() : null;
-        if (sections) {
-            let current = null;
-            for (const sec of sections) {
-                if (sec.time <= t) current = sec.name;
-                else break;
-            }
-            if (current && current !== currentSection) {
-                currentSection = current;
-                if (!sectionStats.find(s => s.name === current)) {
-                    sectionStats.push({ name: current, hits: 0, misses: 0 });
-                }
+        _ndTrackSection(t);
+    }
+
+    // Name of the chart section containing chart time `t` (the last one that
+    // starts at or before it), or null when the chart has no sections.
+    function _ndSectionNameAt(t) {
+        return _ndSectionAt(hw && hw.getSections ? hw.getSections() : null, t);
+    }
+
+    // Advance currentSection to the playhead's section, opening its row in
+    // sectionStats so a section the player passes through still shows up.
+    function _ndTrackSection(t) {
+        const current = _ndSectionNameAt(t);
+        if (current && current !== currentSection) {
+            currentSection = current;
+            if (!sectionStats.find(s => s.name === current)) {
+                sectionStats.push({ name: current, hits: 0, misses: 0 });
             }
         }
     }
 
-    function updateSectionStat(type) {
-        if (!currentSection) return;
-        let sec = sectionStats.find(s => s.name === currentSection);
+    // Bin a judgment by the section its NOTE sits in when we know the note's
+    // chart time. Engine verdicts land after a note's window closes, often once
+    // the playhead has crossed into the next section; the playhead's section
+    // (currentSection) is only the fallback.
+    function updateSectionStat(type, noteTime) {
+        const name = _ndSectionNameAt(noteTime) || currentSection;
+        if (!name) return;
+        let sec = sectionStats.find(s => s.name === name);
         if (!sec) {
-            sec = { name: currentSection, hits: 0, misses: 0 };
+            sec = { name, hits: 0, misses: 0 };
             sectionStats.push(sec);
         }
         if (type === 'hit') sec.hits++;
@@ -10154,7 +10428,7 @@ function createNoteDetector(options = {}) {
 
     function _calLabEffectivePitchTol(chartPitch, flags) {
         let cents = chartPitch;
-        if (flags && (flags.b || flags.sl)) cents = Math.max(cents, 100);
+        if (flags && (_ndHasBend(flags) || _ndHasSlide(flags))) cents = Math.max(cents, 100);
         if (flags && flags.hm) cents = 0;
         return cents;
     }
@@ -10498,8 +10772,8 @@ function createNoteDetector(options = {}) {
                 f: n.f,
                 ho: !!n.ho,
                 po: !!n.po,
-                b: !!n.b,
-                sl: !!n.sl,
+                b: _ndHasBend(n),
+                sl: _ndHasSlide(n),
                 hm: !!n.hm,
             })),
         };
@@ -10519,7 +10793,7 @@ function createNoteDetector(options = {}) {
         const r = batch.results[0];
         const flags = {
             ho: !!noteDef.ho, po: !!noteDef.po,
-            b: !!noteDef.b, sl: !!noteDef.sl, hm: !!noteDef.hm,
+            b: _ndHasBend(noteDef), sl: _ndHasSlide(noteDef), hm: !!noteDef.hm,
         };
         const tick = _calLabTickFromResult(r, flags);
         return {
@@ -10540,7 +10814,7 @@ function createNoteDetector(options = {}) {
             const nd = notes[i] || { s: r.s, f: r.f };
             const flags = {
                 ho: !!nd.ho, po: !!nd.po,
-                b: !!nd.b, sl: !!nd.sl, hm: !!nd.hm,
+                b: _ndHasBend(nd), sl: _ndHasSlide(nd), hm: !!nd.hm,
             };
             return { string: nd.s, fret: nd.f, ..._calLabTickFromResult(r, flags) };
         });
@@ -13626,10 +13900,26 @@ function createNoteDetector(options = {}) {
         tuningOffsets = [0, 0, 0, 0, 0, 0];
         capo = 0;
         const info = (hw && hw.getSongInfo) ? hw.getSongInfo() : null;
+        const eff = _ndReadEffectiveTuning();
+        _ndSyncedTuningKey = eff;
         if (!info) return;
         if (info.arrangement) currentArrangement = _ndArrangementKindFromName(info.arrangement);
-        if (Array.isArray(info.tuning)) tuningOffsets = info.tuning;
-        if (Number.isFinite(info.capo)) capo = info.capo;
+        // Tuning / capo / reference pitch come from the host's EFFECTIVE
+        // getters, not getSongInfo(): getSongInfo() keeps the original chart
+        // metadata, while getNotes()/getChords() (what we score) already carry
+        // any chart-transform provider's output. Reading the original tuning
+        // against transformed frets made a retuned / converted-to-E-standard
+        // chart score against its old pitches. Hosts without the getters
+        // (pre-chart-transform) fall back to song_info.
+        const tuning = Array.isArray(eff.tuning) ? eff.tuning : info.tuning;
+        if (Array.isArray(tuning)) {
+            const shift = _ndRefShiftCents(eff.centOffset !== undefined ? eff.centOffset : info.centOffset);
+            tuningOffsets = shift
+                ? tuning.map(o => (Number(o) || 0) + shift / 100)
+                : tuning;
+        }
+        const effCapo = eff.capo !== undefined ? eff.capo : info.capo;
+        if (Number.isFinite(effCapo)) capo = effCapo;
 
         // String-count resolution, in precedence order:
         //   1. hw.getStringCount() — host's authoritative count. Asked
@@ -13654,7 +13944,7 @@ function createNoteDetector(options = {}) {
         if (Number.isFinite(hostStringCount)) {
             currentStringCount = hostStringCount;
         } else if (info.arrangement) {
-            const tuneLen = Array.isArray(info.tuning) ? info.tuning.length : null;
+            const tuneLen = Array.isArray(tuning) ? tuning.length : null;
             const consistent = currentArrangement === 'bass'
                 ? (tuneLen === 4 || tuneLen === 5)
                 : (tuneLen === 6 || tuneLen === 7 || tuneLen === 8);
@@ -13663,9 +13953,45 @@ function createNoteDetector(options = {}) {
             } else {
                 currentStringCount = currentArrangement === 'bass' ? 4 : 6;
             }
-        } else if (Array.isArray(info.tuning)) {
-            currentStringCount = info.tuning.length;
+        } else if (Array.isArray(tuning)) {
+            currentStringCount = tuning.length;
         }
+    }
+
+    // The host's effective tuning inputs, read raw (undefined when the host
+    // predates the chart-transform getters). Compared by identity in
+    // _ndResyncIfTuningChanged: the highway hands back the same array/number
+    // until a transform restages, so this is a few getter calls per tick.
+    function _ndReadEffectiveTuning() {
+        const read = (name) => {
+            if (!hw || typeof hw[name] !== 'function') return undefined;
+            try { return hw[name](); } catch (_) { return undefined; }
+        };
+        return {
+            tuning: read('getTuning'),
+            capo: read('getCapo'),
+            centOffset: read('getCentOffset'),
+        };
+    }
+    // A chart-transform provider can restage mid-song (select / clear /
+    // refresh — e.g. a live retune) without any song or arrangement event.
+    // Called from the detect tick so scoring follows the effective tuning
+    // within a frame; returns true when it resynced.
+    function _ndResyncIfTuningChanged() {
+        // Pre-chart-transform host: nothing can restage mid-song, and the
+        // song/arrangement events already cover every change.
+        if (!hw || (typeof hw.getTuning !== 'function'
+            && typeof hw.getCapo !== 'function'
+            && typeof hw.getCentOffset !== 'function')) return false;
+        const k = _ndSyncedTuningKey;
+        const now = _ndReadEffectiveTuning();
+        if (k && k.tuning === now.tuning && k.capo === now.capo
+            && (k.centOffset === now.centOffset
+                || (Number.isNaN(k.centOffset) && Number.isNaN(now.centOffset)))) {
+            return false;
+        }
+        _syncChartStateFromHw();
+        return true;
     }
 
     // ── Engine-side chart verification (desktop bridge) ───────────────────
@@ -13704,8 +14030,8 @@ function createNoteDetector(options = {}) {
             mix(Math.round((Number.isFinite(nn.t) ? nn.t : 0) * 1000));
             mix(((nn.s | 0) * 100) + (nn.f | 0));
             mix(Math.round((Number.isFinite(nn.sus) ? nn.sus : 0) * 1000));
-            mix((nn.ho ? 1 : 0) | (nn.po ? 2 : 0) | (nn.b ? 4 : 0)
-                | (nn.sl ? 8 : 0) | (nn.hm ? 16 : 0) | (nn.mt ? 32 : 0));
+            mix((nn.ho ? 1 : 0) | (nn.po ? 2 : 0) | (_ndHasBend(nn) ? 4 : 0)
+                | (_ndHasSlide(nn) ? 8 : 0) | (nn.hm ? 16 : 0) | (nn.mt ? 32 : 0));
         };
         for (const nn of notes) if (nn) mixNote(nn);
         for (const ch of _ndChartChords()) {
@@ -13723,7 +14049,8 @@ function createNoteDetector(options = {}) {
         // value up live — without this the popup sliders are inert on the
         // engine-verifier path until the next song/arrangement change.
         return n + ':' + c + ':' + currentArrangement + ':' + currentStringCount
-            + ':' + capo + ':' + timingTolerance + ':' + pitchTolerance
+            + ':' + capo + ':' + tuningOffsets.slice(0, currentStringCount).join(',')
+            + ':' + timingTolerance + ':' + pitchTolerance
             + ':' + (fnv >>> 0);
     }
 
@@ -13773,7 +14100,7 @@ function createNoteDetector(options = {}) {
                 s: n.s,
                 f: n.f,
                 sus: Number.isFinite(n.sus) ? n.sus : 0,
-                ho: !!n.ho, po: !!n.po, b: !!n.b, sl: !!n.sl, hm: !!n.hm,
+                ho: !!n.ho, po: !!n.po, b: _ndHasBend(n), sl: _ndHasSlide(n), hm: !!n.hm,
             };
             notes.push(entry);
             byId.set(id, { ...n });
@@ -13792,7 +14119,7 @@ function createNoteDetector(options = {}) {
                     s: cn.s,
                     f: cn.f,
                     sus: Number.isFinite(cn.sus) ? cn.sus : 0,
-                    ho: !!cn.ho, po: !!cn.po, b: !!cn.b, sl: !!cn.sl, hm: !!cn.hm,
+                    ho: !!cn.ho, po: !!cn.po, b: _ndHasBend(cn), sl: _ndHasSlide(cn), hm: !!cn.hm,
                 };
                 notes.push(entry);
                 byId.set(id, { ...cn, t: c.t });
@@ -13817,7 +14144,7 @@ function createNoteDetector(options = {}) {
             chordGroups.set(chordKey, {
                 t: grp[0].t,
                 memberIds: grp.map(e => e.id),
-                memberNotes: grp.map(e => ({ s: e.s, f: e.f })),
+                memberNotes: grp.map(e => ({ s: e.s, f: e.f, sus: e.sus || 0 })),
                 maxSus,
             });
             for (const e of grp) chordKeyById.set(e.id, chordKey);
@@ -14020,11 +14347,15 @@ function createNoteDetector(options = {}) {
                 // A bend / slide / harmonic note's pitch deliberately leaves
                 // the chart pitch; widen the pitch gate so the hit rides on
                 // presence + timing, not a moving target.
-                const lenientPitch = !!(cn.b || cn.sl || cn.hm);
+                const lenientPitch = _ndHasBend(cn) || _ndHasSlide(cn) || !!cn.hm;
                 const judgment = makeMatchedJudgment(
                     cn, cn.t, judgedAt, expectedMidi, detectedMidiForJudgment, 1,
                     { pitchError, pitchThresholdCents: lenientPitch ? 600 : undefined }
                 );
+                judgment.strings = _ndStringVerdicts([{
+                    s: cn.s, f: cn.f, detected: true, centsError: v.centsError,
+                    snr: v.snr, detectedAt: v.detectedSongTime,
+                }]);
                 if (!judgment.hit) {
                     const teReason = judgment.timingState === 'EARLY' || judgment.timingState === 'LATE'
                         ? 'TIMING_FAIL'
@@ -14092,7 +14423,12 @@ function createNoteDetector(options = {}) {
                         engineVerdict: _ndSnapshotEngineVerdict(v),
                     });
                 }
-                recordJudgment(key, makeMissJudgment(cn, cn.t, t, expectedMidi));
+                const missJudgment = makeMissJudgment(cn, cn.t, t, expectedMidi);
+                missJudgment.strings = _ndStringVerdicts([{
+                    s: cn.s, f: cn.f, detected: false, centsError: v.centsError,
+                    snr: v.snr, detectedAt: v.detectedSongTime,
+                }]);
+                recordJudgment(key, missJudgment);
             }
         }
 
@@ -14127,9 +14463,27 @@ function createNoteDetector(options = {}) {
             const v = verdictMap.get(id);
             if (v && v.detected) {
                 hitStrings++;
-                if (detectedTime === null) detectedTime = v.detectedSongTime;
+                // Stamp the chord with the member detected closest to the
+                // chart time, not the first one listed. In a fast run of one
+                // shape a string still ringing from the previous chord is
+                // "detected" as soon as this chord's window opens, while the
+                // others land on the strum.
+                const ts = v.detectedSongTime;
+                if (Number.isFinite(ts) && (detectedTime === null
+                    || Math.abs(ts - grp.t) < Math.abs(detectedTime - grp.t))) {
+                    detectedTime = ts;
+                }
                 if (bestCents === null && Number.isFinite(v.centsError)) bestCents = v.centsError;
             }
+        }
+        // The engine only verifies a chord inside its timing window, so a
+        // stamp just before the early hit edge means "present as the window
+        // opened" (the same shape still ringing), stamped by a playhead that
+        // can lag a poll behind. Counted as on time instead of EARLY by that
+        // jitter. A stamp further out than the slack is still EARLY.
+        if (detectedTime !== null && detectedTime < grp.t - chordTimingHitThreshold
+            && detectedTime >= grp.t - timingTolerance - _ND_ENGINE_STAMP_SLACK_S) {
+            detectedTime = grp.t - chordTimingHitThreshold;
         }
         const totalStrings = grp.memberIds.length;
         const score = totalStrings > 0 ? hitStrings / totalStrings : 0;
@@ -14138,6 +14492,15 @@ function createNoteDetector(options = {}) {
             lead.s, lead.f, currentArrangement, currentStringCount, tuningOffsets, capo
         );
         const lateGraceMs = Math.min((grp.maxSus || 0) * 1000, 1000);
+        // Each member's own engine verdict, for the public event (which
+        // strings of a partial chord rang). A member the engine never
+        // reported counts as not heard.
+        const strings = _ndStringVerdicts(grp.memberIds.map((id) => {
+            const m = _ndVerifierChartById.get(id) || {};
+            const v = verdictMap.get(id) || {};
+            return { s: m.s, f: m.f, detected: !!v.detected, centsError: v.centsError,
+                snr: v.snr, detectedAt: v.detectedSongTime };
+        }));
 
         const chordIsHit = score >= chordHitRatio && detectedTime !== null;
         if (chordIsHit) {
@@ -14145,7 +14508,7 @@ function createNoteDetector(options = {}) {
             recordJudgment(chordKey, makeMatchedJudgment(
                 lead, grp.t, detectedTime, expectedMidi, detMidi, 1,
                 { chord: true, notes: grp.memberNotes, hitStrings, totalStrings,
-                  score, pitchError: bestCents, lateGraceMs }
+                  score, pitchError: bestCents, lateGraceMs, strings }
             ));
         } else {
             // Match the legacy chord-miss path: judgedAt is the current
@@ -14167,7 +14530,7 @@ function createNoteDetector(options = {}) {
             });
             recordJudgment(chordKey, makeMissJudgment(
                 lead, grp.t, missJudgedAt, expectedMidi,
-                { chord: true, notes: grp.memberNotes, hitStrings, totalStrings, score, lateGraceMs }
+                { chord: true, notes: grp.memberNotes, hitStrings, totalStrings, score, lateGraceMs, strings }
             ));
         }
 
@@ -14223,7 +14586,7 @@ function createNoteDetector(options = {}) {
                 // That false-`hit` would then make noteStateFor return
                 // 'miss' for the constituent, undoing the whole point of
                 // stamping it with the chord verdict.
-                const lenientPitch = !!(mcn.b || mcn.sl || mcn.hm);
+                const lenientPitch = _ndHasBend(mcn) || _ndHasSlide(mcn) || !!mcn.hm;
                 const mDetMidi = Number.isFinite(bestCents)
                     ? mExpectedMidi + bestCents / 100 : null;
                 mJudgment = makeMatchedJudgment(
@@ -14347,7 +14710,7 @@ function createNoteDetector(options = {}) {
                 s: n.s,
                 f: n.f,
                 sus: Number.isFinite(n.sus) ? n.sus : 0,
-                ho: !!n.ho, po: !!n.po, b: !!n.b, sl: !!n.sl, hm: !!n.hm,
+                ho: !!n.ho, po: !!n.po, b: _ndHasBend(n), sl: _ndHasSlide(n), hm: !!n.hm,
             };
             entries.push(entry);
             byId.set(n.id, { ...n });
@@ -18123,7 +18486,7 @@ function createNoteDetector(options = {}) {
                     && Number.isInteger(n.f) && n.f >= 0)
                 .map(n => ({
                     s: n.s, f: n.f,
-                    ho: !!n.ho, po: !!n.po, b: !!n.b, sl: !!n.sl, hm: !!n.hm,
+                    ho: !!n.ho, po: !!n.po, b: _ndHasBend(n), sl: _ndHasSlide(n), hm: !!n.hm,
                 }));
             let cleanNotes = clean.length ? clean : null;
             // A ctx only makes sense alongside a live target.
@@ -18541,6 +18904,7 @@ function createNoteDetector(options = {}) {
         _bindChartStateEvents: _chartStateBindEvents,
         _unbindChartStateEvents: _chartStateUnbindEvents,
         _syncChartStateFromHw: _syncChartStateFromHw,
+        _resyncIfTuningChanged: _ndResyncIfTuningChanged,
         // Auto-record test hooks — same rationale. Production binds from
         // enableImpl() / unbinds from destroy(); tests drive them without
         // the audio pipeline to assert the song:loaded auto-arm.
@@ -18585,6 +18949,9 @@ function createNoteDetector(options = {}) {
                 if (Number.isFinite(ctx.stringCount))   currentStringCount = ctx.stringCount;
                 if (Array.isArray(ctx.tuningOffsets))   tuningOffsets = ctx.tuningOffsets.slice();
                 if (Number.isFinite(ctx.capo))          capo = ctx.capo;
+                // An injected context is authoritative — don't let the
+                // per-tick effective-tuning resync overwrite it.
+                _ndSyncedTuningKey = _ndReadEffectiveTuning();
             },
             setSettings: (s) => {
                 s = s || {};
