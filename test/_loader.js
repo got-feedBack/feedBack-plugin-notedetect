@@ -266,6 +266,7 @@ function loadDetectionCore({ sandboxBeforeRun } = {}) {
             const r = sandbox._ndEngineOffsets(offsets);
             return Array.isArray(r) ? Array.from(r) : r;
         },
+        engineRoundingCents: sandbox._ndEngineRoundingCents,
         stringBandHz: sandbox._ndStringBandHz,
         bandEnergy: sandbox._ndBandEnergy,
         constraintCheckString: sandbox._ndConstraintCheckString,

@@ -182,3 +182,156 @@ test('the desktop engine chart gets integer offsets under a fractional shift', a
     det.destroy();
     for (let i = 0; i < 6; i++) await new Promise((r) => setImmediate(r));
 });
+
+// ── CodeRabbit follow-ups (#72) ────────────────────────────────────────────
+
+test('_ndEngineRoundingCents is the worst per-string rounding error, rounded up', () => {
+    const core = loadDetectionCore();
+    const f = core.engineRoundingCents;
+    assert.equal(f([0, 0, 0, 0, 0, 0]), 0, 'whole semitones need no slack');
+    assert.equal(f([-1, -2, 0]), 0);
+    assert.equal(f([0.45, 0.45]), 45, 'a +45 c record rounds to 0, 45 c off');
+    assert.equal(f([0.5, 0.25]), 50, '+50 c rounds a full semitone up, 50 c off');
+    assert.equal(f([-1.3, 0]), 30);
+    assert.equal(f([0.118]), 12, 'A443: 11.8 c, rounded up');
+    assert.equal(f(null), 0);
+});
+
+// Desktop-engine harness: a bridge with scoreChord, plus whatever the test
+// adds (setChart / getNoteVerdicts for the engine-verifier path).
+function engineHarness({ audioExtra = {}, hwSetup }) {
+    const out = { pushed: [], scoreChordReqs: [], intervals: [] };
+    const audio = {
+        isAvailable: async () => true,
+        isAudioRunning: async () => true,
+        startAudio: async () => {},
+        getLevels: async () => ({ inputLevel: 0, inputPeak: 0, outputLevel: 0, outputPeak: 0 }),
+        getSampleRate: async () => 48000,
+        getPitchDetection: async () => ({ midiNote: -1, confidence: 0, frequency: -1, cents: 0, noteName: '' }),
+        getRawPitch: async () => ({ midiNote: -1, confidence: 0, frequency: -1, cents: 0, noteName: '' }),
+        scoreChord: async (ctx) => {
+            out.scoreChordReqs.push(ctx);
+            return {
+                score: 0, hitStrings: 0, totalStrings: ctx.notes.length, isHit: false,
+                results: ctx.notes.map(n => ({
+                    s: n.s, f: n.f, hit: false, bandEnergy: 0, centsDiff: null, centsError: null,
+                })),
+            };
+        },
+        ...audioExtra(out),
+    };
+    out.core = loadDetectionCore({
+        sandboxBeforeRun(sandbox) {
+            sandbox.setInterval = (cb) => {
+                if (typeof cb === 'function') out.intervals.push(cb);
+                return out.intervals.length;
+            };
+            sandbox.dispatchEvent = () => true;
+            sandbox.highway.getTime = () => 0;
+            sandbox.highway.getAvOffset = () => 0;
+            sandbox.highway.getStringCount = () => 6;
+            sandbox.highway.getSongInfo = () => ({ arrangement: 'Lead', tuning: [0, 0, 0, 0, 0, 0] });
+            hwSetup(sandbox.highway);
+            sandbox.window.feedBackDesktop = { isDesktop: true, platform: 'linux', audio };
+        },
+    });
+    return out;
+}
+
+async function settle(turns = 6) {
+    for (let i = 0; i < turns; i++) {
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((r) => setImmediate(r));
+    }
+}
+
+async function runTicks(intervals) {
+    for (const cb of intervals) {
+        // eslint-disable-next-line no-await-in-loop
+        await cb();
+        // eslint-disable-next-line no-await-in-loop
+        await settle();
+    }
+}
+
+async function engineChartFor(cents) {
+    const h = engineHarness({
+        audioExtra: (out) => ({
+            setChart: async (chart) => { out.pushed.push(chart); return true; },
+            getNoteVerdicts: async () => [],
+        }),
+        hwSetup(hw) {
+            hw.getNotes = () => ([{ s: 1, f: 2, t: 3.0, sus: 0 }]);
+            hw.getChords = () => ([]);
+            hw.getTuning = () => [0, 0, 0, 0, 0, 0];
+            hw.getCapo = () => 0;
+            hw.getCentOffset = () => cents;
+        },
+    });
+    const det = h.core.createNoteDetector({ isDefault: false });
+    await det.enable();
+    await settle();
+    await runTicks(h.intervals);
+    det.destroy();
+    await settle();
+    assert.ok(h.pushed.length >= 1, 'the host chart reaches the engine');
+    return h.pushed[h.pushed.length - 1];
+}
+
+test('the engine chart pitch gate widens by the semitone-rounding error', async () => {
+    const plain = await engineChartFor(0);
+    assert.ok(plain.pitchCheckCents > 0);
+
+    // Oasis-style +45 c record: rounds to 0 st, so the engine expects the
+    // nominal pitch while the guitar (matched to the record) sits 45 c up.
+    const plus45 = await engineChartFor(45);
+    assert.equal(plus45.tuningOffsets.join(','), '0,0,0,0,0,0');
+    assert.equal(plus45.pitchCheckCents, plain.pitchCheckCents + 45);
+
+    // +50 c rounds a whole semitone UP: still 50 c of error to absorb.
+    const plus50 = await engineChartFor(50);
+    assert.equal(plus50.tuningOffsets.join(','), '1,1,1,1,1,1');
+    assert.equal(plus50.pitchCheckCents, plain.pitchCheckCents + 50);
+
+    // A whole-semitone retune reaches the engine exactly: no widening.
+    const minus100 = await engineChartFor(-100);
+    assert.equal(minus100.tuningOffsets.join(','), '-1,-1,-1,-1,-1,-1');
+    assert.equal(minus100.pitchCheckCents, plain.pitchCheckCents);
+});
+
+test('a mid-song retune is picked up on a downlevel addon (matchNotes(null) fallback)', async () => {
+    let tuning = [0, 0, 0, 0, 0, 0];
+    // No setChart / getNoteVerdicts: the bridge tick takes the legacy
+    // detect + matchNotes(null) path, which never runs processFrame.
+    const h = engineHarness({
+        audioExtra: () => ({}),
+        hwSetup(hw) {
+            hw.getNotes = () => ([]);
+            hw.getChords = () => ([{ t: 0, notes: [{ s: 0, f: 0 }, { s: 1, f: 0 }, { s: 2, f: 0 }] }]);
+            hw.getTuning = () => tuning;
+            hw.getCapo = () => 0;
+            hw.getCentOffset = () => 0;
+        },
+    });
+    const det = h.core.createNoteDetector({ isDefault: false });
+    await det.enable();
+    await settle();
+    await runTicks(h.intervals);
+    assert.ok(h.scoreChordReqs.length >= 1, 'the fallback path scored the chord');
+    assert.equal(det._getChartState().tuningOffsets.join(','), '0,0,0,0,0,0');
+
+    // A chart-transform provider restages (live retune, whole step down)
+    // with no song / arrangement event.
+    tuning = [-2, -2, -2, -2, -2, -2];
+    const before = h.scoreChordReqs.length;
+    await runTicks(h.intervals);
+    assert.equal(det._getChartState().tuningOffsets.join(','), '-2,-2,-2,-2,-2,-2',
+        'the bridge tick resyncs before the matchNotes(null) fallback');
+    if (h.scoreChordReqs.length > before) {
+        const req = h.scoreChordReqs[h.scoreChordReqs.length - 1];
+        assert.equal(Array.from(req.offsets).join(','), '-2,-2,-2,-2,-2,-2',
+            'a chord scored after the restage uses the new tuning');
+    }
+    det.destroy();
+    await settle();
+});

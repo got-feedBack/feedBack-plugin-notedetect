@@ -674,6 +674,23 @@ function _ndEngineOffsets(offsets) {
     return offsets.map(o => Math.round(Number(o) || 0));
 }
 
+// Worst-case cents _ndEngineOffsets moves any string by (0..50). The engine
+// then expects a pitch up to that far from where the guitar really sits, so
+// _ndBridgeSetChart widens the chart's pitch gate by it: a recording at
+// +45 c (common on old records) rounds to 0 and would otherwise put every
+// note 45 c off before the player's own error. Rounded up because the
+// engine may read the gate as an integer.
+function _ndEngineRoundingCents(offsets) {
+    if (!Array.isArray(offsets)) return 0;
+    let worst = 0;
+    for (const o of offsets) {
+        const v = Number(o) || 0;
+        const err = Math.abs(v - Math.round(v)) * 100;
+        if (err > worst) worst = err;
+    }
+    return worst > 1e-6 ? Math.ceil(worst - 1e-6) : 0;
+}
+
 function _ndClassifyTiming(timingErrorMs, timingThresholdMs, lateGraceMs) {
     if (!Number.isFinite(timingErrorMs)) return null;
     const grace = Number.isFinite(lateGraceMs) && lateGraceMs > 0 ? lateGraceMs : 0;
@@ -3695,7 +3712,15 @@ function createNoteDetector(options = {}) {
         const a = _ndBridgeAudio(); if (!a) return Promise.resolve(null);
         chart = _ndEngineCapoPayload(chart);
         if (chart && Array.isArray(chart.tuningOffsets)) {
+            // Rounding the offsets for the Int32 engine moves expected pitches
+            // by up to 50 c; widen the presence gate by the same amount so a
+            // sub-semitone reference shift can't push notes out of tolerance.
+            // (0 = energy-only, so it stays 0.) scoreChord keeps its own window.
+            const slack = _ndEngineRoundingCents(chart.tuningOffsets);
             chart = { ...chart, tuningOffsets: _ndEngineOffsets(chart.tuningOffsets) };
+            if (slack > 0 && Number.isFinite(chart.pitchCheckCents) && chart.pitchCheckCents > 0) {
+                chart.pitchCheckCents += slack;
+            }
         }
         if (sourceId != null && typeof a.setSourceChart === 'function')
             return a.setSourceChart(sourceId, chart);
@@ -4288,6 +4313,14 @@ function createNoteDetector(options = {}) {
                             // owns the slot; _ndOtherOwnsOurSlot() covers a
                             // sibling instance on the same engine source.
                             if (_ndHostChartSuspended || _ndOtherOwnsOurSlot()) return;
+                            // Follow a mid-song chart-transform restage
+                            // (live retune) before ANY branch below maps a
+                            // (string, fret) to a pitch: the engine-verifier
+                            // re-push, and the matchNotes(null) fallback a
+                            // downlevel addon without the verifier API runs.
+                            // Native-frame mode resyncs again in processFrame;
+                            // the identity check makes that a no-op.
+                            _ndResyncIfTuningChanged();
                             // Native-frame detection (gear opt-in): pull the
                             // engine's post-gate mono PCM and run note_detect's
                             // OWN YIN/HPS/CREPE on it via the SAME processFrame
@@ -4339,9 +4372,8 @@ function createNoteDetector(options = {}) {
                                 // re-push whenever the live chart diverges
                                 // from what the engine currently holds.
                                 // A live retune restage changes the
-                                // effective tuning, which is in the
-                                // signature, so it re-pushes here too.
-                                _ndResyncIfTuningChanged();
+                                // effective tuning (resynced above), which
+                                // is in the signature, so it re-pushes here too.
                                 if (_ndChartSignature() !== _ndVerifierChartSig) {
                                     await _ndPushChartToBridge();
                                     if (!enabled || gen !== sessionGen) return;
