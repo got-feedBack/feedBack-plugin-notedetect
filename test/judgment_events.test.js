@@ -127,6 +127,8 @@ test('engine verifier: a partial chord reports which strings rang', async () => 
     assert.ok(d.points > 0, 'points awarded for the hit');
     assert.equal(d.multiplier, 1);
     assert.equal(d.streak, 1);
+    assert.equal(d.verdictAt, 1.4, 'the playhead when the verdict landed');
+    assert.equal(d.noteEnd, 1.0, 'no sustain: the chord ends where it starts');
     det.destroy();
     await flush();
 });
@@ -193,6 +195,40 @@ test('scoreChord path: a missed chord reports the best frame\'s strings', async 
     assert.equal(d.latencyMs, 0);
     assert.equal(d.isDefault, true);
     assert.equal(typeof d.detector, 'string');
+    det.destroy();
+    await flush();
+});
+
+test('engine verifier: a sustained chord hit says it landed after the note ended', async () => {
+    // The engine judges a sustained chord only once its sustain closes, so
+    // the verdict arrives long after a renderer would cull the gem (0.75 s
+    // after its start in highway_3d). verdictAt / noteEnd let it notice.
+    let pushed = null;
+    const queue = [];
+    const env = sandbox({
+        notes: [
+            { t: 1.0, s: 0, f: 5, sus: 1.5, sl: -1, bn: 0 },
+            { t: 1.0, s: 1, f: 7, sus: 0.5, sl: -1, bn: 0 },
+        ],
+        audio: {
+            setChart: async (c) => { pushed = c; return true; },
+            getNoteVerdicts: async () => (queue.length ? queue.shift() : []),
+        },
+    });
+    const det = env.createNoteDetector({ isDefault: false });
+    await det.enable();
+    await flush();
+    await runAll(env.intervals);
+    env.setHwTime(2.7);
+    queue.push(Array.from(pushed.notes, (n) => ({ id: n.id, detected: true, detectedSongTime: 1.0, centsError: 0, snr: 9 })));
+    await runAll(env.intervals);
+    const ev = env.events.find((e) => e.detail && e.detail.chord);
+    assert.ok(ev, 'a chord judgment was emitted');
+    assert.equal(ev.type, 'notedetect:hit');
+    const d = plain(ev.detail);
+    assert.equal(d.noteTime, 1.0);
+    assert.equal(d.noteEnd, 2.5, 'the longest member sustain');
+    assert.equal(d.verdictAt, 2.7);
     det.destroy();
     await flush();
 });

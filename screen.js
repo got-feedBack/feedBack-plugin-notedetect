@@ -1375,17 +1375,16 @@ function _ndGradeClean(hit, timingError, pitchError, cleanTimingMs, cleanPitchCe
 
 // ── Public judgment-event enrichment (notedetect:hit / notedetect:miss) ──
 // Named techniques of a chart note, for consumers of the judgment events.
-// Reads the core wire format (`bn` bend amount, `sl`/`slu` slide-to fret
-// with -1 = none, boolean flags otherwise). Also accepts the boolean
-// `b`/`sl` shape note_detect builds for the scorers. Empty array when the
-// note has no technique; null when there's no chart note (external
-// verdicts).
+// Bend / slide go through _ndHasBend / _ndHasSlide, so both the core wire
+// format (`bn` bend amount, `sl`/`slu` slide-to fret with -1 = none) and the
+// boolean `b`/`sl` shape note_detect builds for the scorers read right.
+// Empty array when the note has no technique; null when there's no chart
+// note (external verdicts).
 function _ndTechniqueNames(n) {
     if (!n || typeof n !== 'object') return null;
     const out = [];
-    if ((Number(n.bn) || 0) > 0 || n.b === true) out.push('bend');
-    if ((typeof n.sl === 'number' && n.sl >= 0) || (typeof n.slu === 'number' && n.slu >= 0)
-        || n.sl === true) out.push('slide');
+    if (_ndHasBend(n)) out.push('bend');
+    if (_ndHasSlide(n)) out.push('slide');
     if (n.hm) out.push('harmonic');
     if (n.hp) out.push('pinchHarmonic');
     if (n.ho) out.push('hammerOn');
@@ -1422,6 +1421,18 @@ function _ndStringVerdicts(entries) {
         out.push(v);
     }
     return out;
+}
+
+// Chart time a judged note / chord finishes: noteTime plus the longest
+// sustain among its chart note and (for chords) its constituents. null when
+// the judgment has no note time.
+function _ndJudgmentNoteEnd(j) {
+    if (!j || !Number.isFinite(j.noteTime)) return null;
+    let sus = 0;
+    const take = (n) => { if (n && Number.isFinite(n.sus) && n.sus > sus) sus = n.sus; };
+    take(j.chartNote);
+    if (Array.isArray(j.notes)) for (const n of j.notes) take(n);
+    return j.noteTime + sus;
 }
 
 // Name of the chart section containing time `t` (sections sorted by
@@ -6147,8 +6158,15 @@ function createNoteDetector(options = {}) {
             judgment.detector = judgment._external ? 'external' : _ndVerifierPathLabel();
             // The section the NOTE sits in (by chart time), not the
             // playhead's: engine verdicts land ~0.4 s late.
-            judgment.section = _ndSectionAt(hw && hw.getSections ? hw.getSections() : null,
-                judgment.noteTime) || currentSection || null;
+            judgment.section = _ndSectionNameAt(judgment.noteTime) || currentSection || null;
+            // When the verdict landed vs when the note finished, both on the
+            // highway's chart clock. The engine verifier judges a sustained
+            // note / chord only after its sustain closes, so verdictAt can
+            // sit well past noteTime — a renderer that has already culled
+            // the gem can use these to show the hit anyway (see README).
+            const _hwNow = (hw && hw.getTime) ? Number(hw.getTime()) : NaN;
+            judgment.verdictAt = Number.isFinite(_hwNow) ? _hwNow : null;
+            judgment.noteEnd = _ndJudgmentNoteEnd(judgment);
             judgment.points = Number.isFinite(judgment._ndPoints) ? judgment._ndPoints : 0;
             judgment.multiplier = multiplier;
             judgment.streak = streak;
@@ -7123,14 +7141,7 @@ function createNoteDetector(options = {}) {
     // Name of the chart section containing chart time `t` (the last one that
     // starts at or before it), or null when the chart has no sections.
     function _ndSectionNameAt(t) {
-        const sections = hw.getSections ? hw.getSections() : null;
-        if (!sections || !Number.isFinite(t)) return null;
-        let current = null;
-        for (const sec of sections) {
-            if (sec.time <= t) current = sec.name;
-            else break;
-        }
-        return current;
+        return _ndSectionAt(hw && hw.getSections ? hw.getSections() : null, t);
     }
 
     // Advance currentSection to the playhead's section, opening its row in
@@ -14133,7 +14144,7 @@ function createNoteDetector(options = {}) {
             chordGroups.set(chordKey, {
                 t: grp[0].t,
                 memberIds: grp.map(e => e.id),
-                memberNotes: grp.map(e => ({ s: e.s, f: e.f })),
+                memberNotes: grp.map(e => ({ s: e.s, f: e.f, sus: e.sus || 0 })),
                 maxSus,
             });
             for (const e of grp) chordKeyById.set(e.id, chordKey);

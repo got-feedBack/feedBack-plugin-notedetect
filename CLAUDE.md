@@ -67,7 +67,7 @@ defer the window copy a task and drop it if the element copy arrived
 
 | Event | Bus too? | Payload (additive-only contract) |
 |---|---|---|
-| `notedetect:hit` / `notedetect:miss` | as `note:hit`/`note:miss` | the full judgment (`{ hit, chord, note, notes, noteTime, timingState, timingError, pitchState, pitchError, ... }`), plus from v1.33 `{ key, strings, techniques, latencyMs, avOffsetMs, detector, section, counted, points, multiplier, streak, isDefault }` (field reference in README "Events"; stamped by `_ndEnrichJudgment` at emit) |
+| `notedetect:hit` / `notedetect:miss` | as `note:hit`/`note:miss` | the full judgment (`{ hit, chord, note, notes, noteTime, timingState, timingError, pitchState, pitchError, ... }`), plus from v1.33 `{ key, strings, techniques, latencyMs, avOffsetMs, detector, section, counted, points, multiplier, streak, isDefault, verdictAt, noteEnd }` (field reference in README "Events"; stamped by `_ndEnrichJudgment` at emit) |
 | `notedetect:fx` | yes | `{ fxType: 'multiplier', mult, prevMult, streak }` on tier change; `{ fxType: 'milestone', streak, mult }` at 25/50/every 100; `{ fxType: 'streakBreak', lostStreak, prevMult }` after a ≥10 run dies. All carry `{ isDefault, ts }` |
 | `notedetect:session` | no | end-of-song summary: `{ title, artist, arrangement, accuracy, hits, misses, bestStreak, score, maxMultiplier, grade, fullCombo, sections, timestamp }` (consumed by the practice journal — never rename/remove keys) |
 | `notedetect:skin` | yes | `{ skin }` — re-resolve any cached palette on this |

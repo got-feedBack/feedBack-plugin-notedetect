@@ -135,6 +135,7 @@ Field reference for the per-note events:
 | `section` | Name of the chart section the note sits in (by chart time), or `null` | all events (v1.33+) |
 | `counted` / `points` / `multiplier` / `streak` | Whether the judgment counted toward the score, the points it earned, and the multiplier and streak after it | all events (v1.33+) |
 | `isDefault` | `true` for the main player's detector, `false` for a splitscreen panel's | all events (v1.33+) |
+| `verdictAt` / `noteEnd` | Chart time (highway clock, seconds) when the verdict was emitted, and when the judged note / chord finished (`noteTime` + its longest sustain). The desktop engine judges a sustained note only after its sustain closes, so `verdictAt` can be well past `noteTime`; a renderer that has already culled the gem can use these to still flash the hit | all chart judgments (v1.33+); `null` without a note time |
 
 Fields are additive: existing ones keep their meaning, and new ones may appear. Timing class for a scorecard is `timingState` (`OK` / `EARLY` / `LATE`) with `timingError` as the signed offset.
 
