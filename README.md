@@ -1,13 +1,13 @@
-# Slopsmith Note Detection Plugin
+# feedBack Note Detection Plugin
 
-Real-time pitch detection and scoring for [Slopsmith](https://github.com/got-feedback/feedback) — works on **guitar** (6/7/8-string) and **bass** (4/5-string) arrangements. The active tuning base is selected automatically from the loaded arrangement. Captures audio from your browser's audio input, detects the pitch being played, compares it against the notes on the highway, and shows hit/miss feedback with accuracy scoring. Single notes use YIN/HPS/CREPE pitch detection; chords use a constraint-based per-string energy check that scores how many of a chord's strings are actually ringing.
+Real-time pitch detection and scoring for [feedBack](https://github.com/got-feedback/feedBack) — works on **guitar** (6/7/8-string) and **bass** (4/5-string) arrangements. The active tuning base is selected automatically from the loaded arrangement. Captures audio from your browser's audio input, detects the pitch being played, compares it against the notes on the highway, and shows hit/miss feedback with accuracy scoring. Single notes use YIN/HPS/CREPE pitch detection; chords use a constraint-based per-string energy check that scores how many of a chord's strings are actually ringing.
 
 ## Install
 
 ```bash
 cd plugins
 git clone https://github.com/got-feedback/feedback-plugin-notedetect.git note_detect
-# restart Slopsmith
+# restart feedBack
 ```
 
 ## How It Works
@@ -19,7 +19,7 @@ git clone https://github.com/got-feedback/feedback-plugin-notedetect.git note_de
 5. The note's **gem lights up brightly** on the highway when you hit it cleanly — and a sustained note keeps glowing for as long as you keep playing it on-pitch; a miss is flagged on the note too
 6. Running accuracy and streak shown in the HUD
 
-> **How step 5 renders depends on the active highway renderer.** The plugin publishes a per-note judgment via Slopsmith core's `highway.setNoteStateProvider` hook (slopsmith#254 — honored by the bundled 2D and 3D highways; other renderers can read the same data from the core renderer `bundle`'s `getNoteState(note, chartTime)` method). On the **default 2D highway** the plugin *also* draws its own canvas overlay — the slide-down red ✕ miss markers below the now-line, the EARLY/LATE/SHARP/FLAT diagnostic labels, and the cyan "currently detected" indicator. On a **custom renderer** (e.g. the 3D highway) that canvas overlay is suppressed — the renderer owns the per-note feedback there (the 3D highway shows hit/active glow and a red miss outline + the diagnostic labels itself). The HUD (accuracy/streak), the end-of-song summary, and the optional screen-edge flash are DOM, not canvas, so they show under any renderer. On an **older core** without the hook, the plugin falls back to the 2D-canvas green hit ring / red miss marker overlay near the note regardless of renderer.
+> **How step 5 renders depends on the active highway renderer.** The plugin publishes a per-note judgment via feedBack core's `highway.setNoteStateProvider` hook (slopsmith#254 — honored by the bundled 2D and 3D highways; other renderers can read the same data from the core renderer `bundle`'s `getNoteState(note, chartTime)` method). On the **default 2D highway** the plugin *also* draws its own canvas overlay — the slide-down red ✕ miss markers below the now-line, the EARLY/LATE/SHARP/FLAT diagnostic labels, and the cyan "currently detected" indicator. On a **custom renderer** (e.g. the 3D highway) that canvas overlay is suppressed — the renderer owns the per-note feedback there (the 3D highway shows hit/active glow and a red miss outline + the diagnostic labels itself). The HUD (accuracy/streak), the end-of-song summary, and the optional screen-edge flash are DOM, not canvas, so they show under any renderer. On an **older core** without the hook, the plugin falls back to the 2D-canvas green hit ring / red miss marker overlay near the note regardless of renderer.
 
 ## Audio Input Channel Selection
 
@@ -71,10 +71,10 @@ All settings are persisted in localStorage across sessions.
 
 ## Drill mode
 
-Set an A-B loop in Slopsmith and notedetect automatically tracks each loop iteration as a separate "drill" attempt. The HUD shows your most recent iterations with per-iteration accuracy so you can see whether you're improving as you repeat the same passage.
+Set an A-B loop in feedBack and notedetect automatically tracks each loop iteration as a separate "drill" attempt. The HUD shows your most recent iterations with per-iteration accuracy so you can see whether you're improving as you repeat the same passage.
 
-- Activates whenever Slopsmith has both loop bounds set as finite numbers (`window.slopsmith.getLoop()` returns `loopA` and `loopB` that both pass `Number.isFinite`). Null, undefined, or missing fields keep drill inactive.
-- Snapshots iteration stats on every `loop:restart` event (Slopsmith emits this at every wrap)
+- Activates whenever feedBack has both loop bounds set as finite numbers (`window.slopsmith.getLoop()` returns `loopA` and `loopB` that both pass `Number.isFinite`). Null, undefined, or missing fields keep drill inactive.
+- Snapshots iteration stats on every `loop:restart` event (feedBack emits this at every wrap)
 - Per-iteration counters are independent of the global session score — your overall accuracy stays correct
 - Iteration history clears on song change or when the loop bounds change to a different passage
 - Iterations with zero judgments don't appear (idle wraps don't pollute the scoreboard)
@@ -90,7 +90,7 @@ Read the live drill state from another plugin via `noteDetector.getDrillStats()`
 }
 ```
 
-Requires Slopsmith with the plugin-API series merged. Used APIs: `loop:restart` (snapshot trigger), `song:loaded` + `song:ended` (clear history), `getLoop()` (activation gate). Landed in Slopsmith PRs #198 / #200 / #201.
+Requires feedBack core with the plugin-API series merged. Used APIs: `loop:restart` (snapshot trigger), `song:loaded` + `song:ended` (clear history), `getLoop()` (activation gate). Landed in slopsmith PRs #198 / #200 / #201.
 
 ## Events
 
@@ -102,8 +102,8 @@ Other plugins can listen for these `window`-scoped `CustomEvent`s:
 | `notedetect:miss` | A chart note's timing window expires **or** a matched-but-not-clean attempt is classified | Full judgment object (see field reference below) |
 | `notedetect:session` | End of song | aggregate stats for the full run (see [Practice Journal plugin](https://github.com/got-feedback/feedback-plugin-practice) for a consumer) |
 
-When Slopsmith's event bus is available, the plugin also emits
-`window.slopsmith` events:
+When feedBack's event bus is available, the plugin also emits
+events on it (`window.slopsmith`, the legacy alias core keeps for `window.feedBack`):
 
 | Event | When | Payload |
 |---|---|---|
@@ -146,7 +146,7 @@ YIN is the default and handles most rigs well. The other methods are opt-in for 
 
 ### Desktop: detect in-plugin on native audio
 
-On the Slopsmith **desktop** app the native JUCE engine owns the audio device and, by default, the engine's own detector produces the pitch/note verdicts the plugin consumes — so the **Detection Method** selector above has no effect there. Enable **Detect in-plugin (native audio)** in the gear ⚙ settings to instead run note_detect's own YIN/HPS/CREPE on the engine-captured guitar signal (pulled via the engine's `getRawAudioFrame` API), which is what lets you pick HPS or CREPE on desktop. Chords are still verified by the engine's harmonic-comb chord scorer. Because the audio comes from the native engine (not the browser's `getUserMedia`), this also sidesteps Electron's broken multichannel-USB capture on some interfaces (slopsmith#818). The toggle only appears on a desktop build whose engine exposes the raw-frame API, and takes effect the next time Detect is switched on.
+On the feedBack **desktop** app the native JUCE engine owns the audio device and, by default, the engine's own detector produces the pitch/note verdicts the plugin consumes — so the **Detection Method** selector above has no effect there. Enable **Detect in-plugin (native audio)** in the gear ⚙ settings to instead run note_detect's own YIN/HPS/CREPE on the engine-captured guitar signal (pulled via the engine's `getRawAudioFrame` API), which is what lets you pick HPS or CREPE on desktop. Chords are still verified by the engine's harmonic-comb chord scorer. Because the audio comes from the native engine (not the browser's `getUserMedia`), this also sidesteps Electron's broken multichannel-USB capture on some interfaces (slopsmith#818). The toggle only appears on a desktop build whose engine exposes the raw-frame API, and takes effect the next time Detect is switched on.
 
 ### Chord detection
 
@@ -174,41 +174,42 @@ No extra dependencies — the FFT is an inline radix-2 Cooley-Tukey, ~80 lines o
 
 TensorFlow.js neural network model (~20MB, loaded lazily on first use). More robust with heavily distorted or effected signals. Uses WebGL acceleration when available. If the model fails to load (network / WebGL), YIN is used as a transparent runtime fallback.
 
-### ML note detection (Slopsmith Desktop only)
+### ML note detection (feedBack Desktop only)
 
-On **Slopsmith Desktop**, when the native audio engine has the Spotify **Basic Pitch** model loaded, detection is upgraded transparently — no setting to flip. The plugin's desktop bridge consumes the engine's polyphonic transcription:
+On **feedBack Desktop**, when the native audio engine has the Spotify **Basic Pitch** model loaded, detection is upgraded transparently — no setting to flip. The plugin's desktop bridge consumes the engine's polyphonic transcription:
 
 - **Single notes** — when the engine exposes `audio.detectNotes`, each fresh per-pitch onset from the ML detector is matched to the nearest chart note; otherwise the dominant pitch comes from `audio.getPitchDetection` (ML-backed when a model is loaded, else YIN).
 - **Chords** — judged by the native `audio.scoreChord` IPC, gated on a fresh chord-pitch onset. When the ML model is loaded the engine's scorer checks each chart note's expected pitch against the model's active pitch set — genuine polyphonic transcription, where a **wrong** note is simply absent from the set rather than false-positiving on a neighbour's energy-band bleed; without the model it uses the constraint-based per-string scorer.
 
-This path is fully feature-detected and fail-soft: a desktop build without `detectNotes` still scores single notes via `getPitchDetection`; one without the `scoreChord` IPC skips chord scoring; and a build without the ML model falls back to YIN/`ChordScorer`. The browser build is unaffected and keeps the JS YIN/HPS/CREPE + constraint path. See `slopsmith-desktop/src/audio/MlNoteDetector.*`.
+This path is fully feature-detected and fail-soft: a desktop build without `detectNotes` still scores single notes via `getPitchDetection`; one without the `scoreChord` IPC skips chord scoring; and a build without the ML model falls back to YIN/`ChordScorer`. The browser build is unaffected and keeps the JS YIN/HPS/CREPE + constraint path. See `feedBack-desktop/src/audio/MlNoteDetector.*`.
 
 ## Requirements
 
 - Browser with `getUserMedia` support (all modern browsers)
 - Audio input device (built-in mic, USB audio interface, or USB multi-effects pedal)
-- Slopsmith core with `highway.getSongInfo()` tuning data (v1.x+)
+- feedBack core with `highway.getSongInfo()` tuning data (v1.x+)
 
 ## Develop locally
 
 The repo ships a `Makefile` + compose overlay that mounts this plugin into a
-running Slopsmith container via `SLOPSMITH_PLUGINS_DIR` (upstream
-`slopsmith@b65a08c`). You edit `screen.js` here; the browser reload picks
-it up.
+running feedBack container via the user-plugins directory env var. Core reads
+`FEEDBACK_PLUGINS_DIR` first and still accepts the old `SLOPSMITH_PLUGINS_DIR`,
+which is the name the overlay sets (upstream `slopsmith@b65a08c`). You edit
+`screen.js` here; the browser reload picks it up.
 
-Prereqs: a Slopsmith checkout (`../slopsmith` by default) and Docker
-Compose v2.
+Prereqs: a feedBack core checkout (`../slopsmith` by default, override with
+`SLOPSMITH_DIR`) and Docker Compose v2.
 
 ### Two workflows
 
 | What you're doing | Where | How |
 |---|---|---|
-| Running Slopsmith without touching this plugin | `~/src/slopsmith` | `DLC_PATH=... docker compose up -d` |
-| **Developing this plugin** (live-mounted into Slopsmith) | This repo | `make dev` |
+| Running feedBack without touching this plugin | `~/src/slopsmith` | `DLC_PATH=... docker compose up -d` |
+| **Developing this plugin** (live-mounted into feedBack) | This repo | `make dev` |
 
-`make dev` is not a competing launcher — it uses `slopsmith/docker-compose.yml`
+`make dev` is not a competing launcher — it uses the core checkout's `docker-compose.yml`
 plus `docker-compose.slopsmith.yml` (the overlay in this repo) to add the
-bind mount and the `SLOPSMITH_PLUGINS_DIR` env var. Edits to `screen.js`
+bind mount and the plugins-dir env var. Edits to `screen.js`
 here are live on the next browser reload.
 
 ### One-time setup
@@ -231,26 +232,26 @@ substitutions in the overlay.
 ```bash
 make help              # list targets
 make test              # run the node:test suite (no deps)
-make dev               # start slopsmith with this plugin mounted
+make dev               # start feedBack with this plugin mounted
 make logs              # tail the container
 make verify-mount      # confirm the plugin is visible inside
-make down              # stop slopsmith
+make down              # stop feedBack
 ```
 
-`make dev` launches Slopsmith at `http://localhost:$SLOPSMITH_PORT` with this
+`make dev` launches feedBack at `http://localhost:$SLOPSMITH_PORT` with this
 plugin mounted read-only at `/opt/user-plugins/note_detect`. The built-in
 `plugins/` directory still loads as usual; this plugin's `plugin.json.id` wins
 on the duplicate-id check so a previously-installed copy is safely shadowed.
 
-### Why not clone into `slopsmith/plugins/` directly?
+### Why not clone into the core `plugins/` directory directly?
 
 You can (the README's "Install" section describes that). The overlay approach
 is better for development because:
 
-- Your edits live in a git-tracked repo separate from the Slopsmith tree
+- Your edits live in a git-tracked repo separate from the feedBack tree
 - No manual sync or symlinks
-- Swap branches without touching Slopsmith's working tree
-- `make down` cleans up; no leftovers in `slopsmith/plugins/`
+- Swap branches without touching feedBack's working tree
+- `make down` cleans up; no leftovers in the core `plugins/` directory
 
 ## Tests
 
