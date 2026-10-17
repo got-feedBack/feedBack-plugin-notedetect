@@ -230,3 +230,54 @@ test('older host without getStringCount: bass with arrangement XML-padded 6-entr
         'bass + tuning.length=6 (arrangement XML pad) must fall back to bass-4');
     det.destroy();
 });
+
+test('a chart transform\'s effective tuning and capo win over the original song info', () => {
+    // A provider re-fretted a Drop D chart into D-standard shapes: the
+    // highway's getTuning() reports the uniform tuning the frets now match,
+    // while getSongInfo() keeps the original Drop D metadata.
+    const core = loadDetectionCore();
+    const det = mountDetectorWithSong(core, {
+        arrangement: 'Lead', tuning: [-2, 0, 0, 0, 0, 0], capo: 0, stringCount: 6,
+    });
+    core.highway.getTuning = () => [-2, -2, -2, -2, -2, -2];
+    core.highway.getCapo = () => 0;
+    det._syncChartStateFromHw();
+    let state = det._getChartState();
+    assert.deepEqual([...state.tuningOffsets], [-2, -2, -2, -2, -2, -2]);
+    assert.equal(state.capo, 0);
+
+    // A transform that moves the capo is honoured too.
+    core.highway.getCapo = () => 3;
+    det._syncChartStateFromHw();
+    state = det._getChartState();
+    assert.equal(state.capo, 3);
+    det.destroy();
+});
+
+test('older hosts without getTuning/getCapo keep using the song info', () => {
+    const core = loadDetectionCore();
+    const det = mountDetectorWithSong(core, {
+        arrangement: 'Lead', tuning: [-2, 0, 0, 0, 0, 0], capo: 2, stringCount: 6,
+    });
+    delete core.highway.getTuning;
+    delete core.highway.getCapo;
+    det._syncChartStateFromHw();
+    const state = det._getChartState();
+    assert.deepEqual([...state.tuningOffsets], [-2, 0, 0, 0, 0, 0]);
+    assert.equal(state.capo, 2);
+    det.destroy();
+});
+
+test('an empty or throwing effective tuning falls back to the song info', () => {
+    const core = loadDetectionCore();
+    const det = mountDetectorWithSong(core, {
+        arrangement: 'Bass', tuning: [-1, -1, -1, -1], capo: 0, stringCount: 4,
+    });
+    core.highway.getTuning = () => [];
+    core.highway.getCapo = () => { throw new Error('boom'); };
+    det._syncChartStateFromHw();
+    const state = det._getChartState();
+    assert.deepEqual([...state.tuningOffsets], [-1, -1, -1, -1]);
+    assert.equal(state.capo, 0);
+    det.destroy();
+});

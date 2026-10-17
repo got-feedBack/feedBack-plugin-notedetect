@@ -13628,8 +13628,19 @@ function createNoteDetector(options = {}) {
         const info = (hw && hw.getSongInfo) ? hw.getSongInfo() : null;
         if (!info) return;
         if (info.arrangement) currentArrangement = _ndArrangementKindFromName(info.arrangement);
-        if (Array.isArray(info.tuning)) tuningOffsets = info.tuning;
-        if (Number.isFinite(info.capo)) capo = info.capo;
+        // Tuning and capo of the chart as the highway shows it. A chart-
+        // transform provider (core #952) can re-fret the notes and change the
+        // tuning to match, e.g. a drop tuning shown as standard shapes;
+        // getSongInfo() keeps the ORIGINAL metadata, so scoring the transformed
+        // frets against it would expect the wrong pitch on re-fretted strings.
+        // Older hosts without the effective getters fall back to songInfo.
+        let effTuning = null, effCapo = null;
+        try { effTuning = (hw && typeof hw.getTuning === 'function') ? hw.getTuning() : null; } catch (_) {}
+        try { effCapo = (hw && typeof hw.getCapo === 'function') ? hw.getCapo() : null; } catch (_) {}
+        const tuning = Array.isArray(effTuning) && effTuning.length ? effTuning : info.tuning;
+        if (Array.isArray(tuning)) tuningOffsets = tuning;
+        if (Number.isFinite(effCapo)) capo = effCapo;
+        else if (Number.isFinite(info.capo)) capo = info.capo;
 
         // String-count resolution, in precedence order:
         //   1. hw.getStringCount() — host's authoritative count. Asked
@@ -13654,7 +13665,7 @@ function createNoteDetector(options = {}) {
         if (Number.isFinite(hostStringCount)) {
             currentStringCount = hostStringCount;
         } else if (info.arrangement) {
-            const tuneLen = Array.isArray(info.tuning) ? info.tuning.length : null;
+            const tuneLen = Array.isArray(tuning) ? tuning.length : null;
             const consistent = currentArrangement === 'bass'
                 ? (tuneLen === 4 || tuneLen === 5)
                 : (tuneLen === 6 || tuneLen === 7 || tuneLen === 8);
@@ -13663,8 +13674,8 @@ function createNoteDetector(options = {}) {
             } else {
                 currentStringCount = currentArrangement === 'bass' ? 4 : 6;
             }
-        } else if (Array.isArray(info.tuning)) {
-            currentStringCount = info.tuning.length;
+        } else if (Array.isArray(tuning)) {
+            currentStringCount = tuning.length;
         }
     }
 
